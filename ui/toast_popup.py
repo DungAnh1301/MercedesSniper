@@ -2,6 +2,9 @@
 """
 Thẻ thông báo nổi góc dưới phải màn hình (Sleek Studio Toast) — không cướp chuột khi đang làm việc.
 """
+import urllib.parse
+import webbrowser
+
 from PyQt6.QtCore import QPoint, Qt, QTimer
 from PyQt6.QtWidgets import (
     QApplication,
@@ -13,7 +16,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ui.theme import make_rounded_thumbnail, open_media_file, reveal_in_explorer
+from ui.theme import make_rounded_thumbnail, reveal_in_explorer
 
 
 class DesktopToastPopup(QWidget):
@@ -93,23 +96,27 @@ class DesktopToastPopup(QWidget):
         mid_row.addLayout(info_col, 1)
         lay.addLayout(mid_row)
 
-        if file_path:
-            btn_row = QHBoxLayout()
-            btn_row.setSpacing(8)
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
 
+        if file_path:
             btn_folder = QPushButton("📂 Mở Thư Mục")
+            btn_folder.setObjectName("DragActionBtn")
             btn_folder.setFixedHeight(30)
             btn_folder.setCursor(Qt.CursorShape.PointingHandCursor)
             btn_folder.clicked.connect(lambda: (reveal_in_explorer(self.file_path), self._dismiss()))
-
-            btn_play = QPushButton("▶ Phát Ngay")
-            btn_play.setObjectName("DragActionBtn")
-            btn_play.setFixedHeight(30)
-            btn_play.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn_play.clicked.connect(lambda: (open_media_file(self.file_path), self._dismiss()))
-
             btn_row.addWidget(btn_folder)
-            btn_row.addWidget(btn_play)
+
+        if video_title:
+            btn_tt = QPushButton("🔍 Search TikTok")
+            btn_tt.setObjectName("TikTokSearchBtn")
+            btn_tt.setFixedHeight(30)
+            btn_tt.setCursor(Qt.CursorShape.PointingHandCursor)
+            tt_url = f"https://www.tiktok.com/search?q={urllib.parse.quote(video_title.strip())}"
+            btn_tt.clicked.connect(lambda: (webbrowser.open(tt_url), self._dismiss()))
+            btn_row.addWidget(btn_tt)
+
+        if btn_row.count() > 0:
             lay.addLayout(btn_row)
 
         outer.addWidget(card)

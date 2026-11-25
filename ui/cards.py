@@ -6,6 +6,7 @@ Hệ thống Thẻ Giao Diện Tương Phản Cao (High-Contrast Studio Cards):
 - Mọi nút bấm đều sáng, sắc nét, không có bất kỳ nút tối đen nào.
 """
 import os
+import urllib.parse
 import webbrowser
 
 from PyQt6.QtCore import QMimeData, QPoint, Qt, QTimer, QUrl
@@ -28,7 +29,6 @@ from core.capcut_injector import BLANK_TEMPLATE_KEY
 from ui.theme import (
     ToggleSwitch,
     make_rounded_thumbnail,
-    open_media_file,
     reveal_in_explorer,
 )
 
@@ -445,6 +445,22 @@ class DownloadCardWidget(QFrame):
                     f"1-Click đưa thẳng video này vào Mẫu '{val}' trong CapCut (giữ thông số mẫu + thay Title + giữ PART 1)!"
                 )
 
+    def _make_tiktok_btn(self) -> QPushButton:
+        btn_tt = QPushButton("🔍 TikTok")
+        btn_tt.setObjectName("TikTokSearchBtn")
+        btn_tt.setFixedHeight(26)
+        btn_tt.setToolTip("Tìm tiêu đề video này trên TikTok (kiểm tra đã có ai đăng chưa)")
+        btn_tt.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_tt.clicked.connect(self._open_tiktok_search)
+        return btn_tt
+
+    def _open_tiktok_search(self):
+        raw_q = (self._raw_title or "").strip()
+        if not raw_q or raw_q == "Đang lấy thông tin video...":
+            raw_q = self.video_id
+        search_url = f"https://www.tiktok.com/search?q={urllib.parse.quote(raw_q)}"
+        webbrowser.open(search_url)
+
     def _rebuild_actions(self, mode: str, file_path: str):
         self._btn_cc_ref = None
         self.cmb_card_tpl = None
@@ -454,6 +470,7 @@ class DownloadCardWidget(QFrame):
                 child.widget().deleteLater()
 
         if mode == "active":
+            self.action_lay.addWidget(self._make_tiktok_btn())
             btn_cancel = QPushButton("✕ Hủy")
             btn_cancel.setObjectName("GhostDangerBtn")
             btn_cancel.setFixedSize(64, 26)
@@ -463,7 +480,7 @@ class DownloadCardWidget(QFrame):
 
         elif mode == "completed" and file_path:
             if self._on_capcut is not None:
-                cmb_tpl = TemplatePickerButton(blank_label="Project trắng", width=116, height=26)
+                cmb_tpl = TemplatePickerButton(blank_label="Project trắng", width=114, height=26)
                 cmb_tpl.on_changed = self._on_card_tpl_user_changed
                 self.cmb_card_tpl = cmb_tpl
                 btn_cc = QPushButton("✂️ CapCut")
@@ -478,12 +495,14 @@ class DownloadCardWidget(QFrame):
 
             btn_drag = DragDropFileButton(file_path)
 
-            btn_play = QPushButton("▶")
-            btn_play.setObjectName("SubtleIconBtn")
-            btn_play.setFixedSize(28, 26)
-            btn_play.setToolTip("Phát video ngay")
-            btn_play.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn_play.clicked.connect(lambda: open_media_file(file_path))
+            btn_folder = QPushButton("📂")
+            btn_folder.setObjectName("SubtleIconBtn")
+            btn_folder.setFixedSize(28, 26)
+            btn_folder.setToolTip("Mở thư mục chứa file video này (bôi đen sẵn file)")
+            btn_folder.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn_folder.clicked.connect(lambda: reveal_in_explorer(file_path))
+
+            btn_tt = self._make_tiktok_btn()
 
             btn_copy = QPushButton("📋")
             btn_copy.setObjectName("SubtleIconBtn")
@@ -493,10 +512,13 @@ class DownloadCardWidget(QFrame):
             btn_copy.clicked.connect(lambda: self._copy_with_feedback(btn_copy))
 
             self.action_lay.addWidget(btn_drag)
-            self.action_lay.addWidget(btn_play)
+            self.action_lay.addWidget(btn_folder)
+            self.action_lay.addWidget(btn_tt)
             self.action_lay.addWidget(btn_copy)
 
         elif mode == "server_feed":
+            self.action_lay.addWidget(self._make_tiktok_btn())
+
             btn_dl = QPushButton("⬇ Tải")
             btn_dl.setObjectName("RubyBtn")
             btn_dl.setFixedHeight(26)
@@ -515,6 +537,7 @@ class DownloadCardWidget(QFrame):
             self.action_lay.addWidget(btn_yt)
 
         elif mode == "skipped":
+            self.action_lay.addWidget(self._make_tiktok_btn())
             btn_dl = QPushButton("⬇ Tải")
             btn_dl.setObjectName("RubyBtn")
             btn_dl.setFixedHeight(26)
@@ -523,6 +546,7 @@ class DownloadCardWidget(QFrame):
             self.action_lay.addWidget(btn_dl)
 
         else:
+            self.action_lay.addWidget(self._make_tiktok_btn())
             btn_retry = QPushButton("↻ Tải Lại")
             btn_retry.setFixedHeight(26)
             btn_retry.setCursor(Qt.CursorShape.PointingHandCursor)

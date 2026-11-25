@@ -38,11 +38,13 @@ def create_mercedes_icon() -> QIcon:
 def reveal_in_explorer(file_path: str):
     if not file_path:
         return
-    norm = os.path.normpath(file_path)
+    norm = os.path.abspath(os.path.normpath(file_path))
     if os.path.exists(norm):
-        subprocess.Popen(["explorer", "/select,", norm])
-    elif os.path.isdir(os.path.dirname(norm)):
-        os.startfile(os.path.dirname(norm))
+        subprocess.Popen(f'explorer.exe /select,"{norm}"')
+    else:
+        parent = os.path.dirname(norm)
+        if parent and os.path.isdir(parent):
+            os.startfile(parent)
 
 
 def open_media_file(file_path: str):
@@ -481,6 +483,20 @@ QPushButton#SubtleIconBtn {
 QPushButton#SubtleIconBtn:hover {
     background-color: #FFFFFF;
     border-color: #38BDF8;
+}
+QPushButton#TikTokSearchBtn {
+    background-color: #0F172A;
+    border: 1.5px solid #22D3EE;
+    border-radius: 6px;
+    padding: 1px 7px;
+    color: #67E8F9;
+    font-size: 11px;
+    font-weight: 800;
+}
+QPushButton#TikTokSearchBtn:hover {
+    background-color: #164E63;
+    border-color: #FE2C55;
+    color: #FFFFFF;
 }
 QPushButton#GhostDangerBtn {
     background-color: #EF4444;
