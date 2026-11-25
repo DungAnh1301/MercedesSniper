@@ -1,0 +1,30 @@
+# Byte-compiled / caches
+__pycache__/
+*.py[cod]
+*$py.class
+.yt_cache/
+
+# PyInstaller build outputs & temporary artifacts
+build/
+dist/
+dist_stage/
+dist_release/
+*.spec
+
+# Local databases, user configs & test outputs
+*.db
+*.db-wal
+*.db-shm
+sniper_config.json
+test_outputs/
+updates/
+rollback/
+*.log
+*.tmp
+*.bak
+
+# OS / IDE files
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
