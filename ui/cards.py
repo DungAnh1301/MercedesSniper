@@ -35,6 +35,22 @@ from ui.theme import (
 _COVER_PIX_CACHE: dict[str, QPixmap] = {}
 
 
+class _ClickableLabel(QLabel):
+    """Nhãn bấm được siêu nhẹ (0ms chi phí vẽ) dùng cho Thumbnail & Tiêu đề Video."""
+
+    def __init__(self, text: str = "", on_click=None, parent=None):
+        super().__init__(text, parent)
+        self._on_click = on_click
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self._on_click and self.rect().contains(event.pos()):
+            self._on_click()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
 class NoWheelComboBox(QComboBox):
     """Ngăn con lăn chuột vô tình đổi mẫu CapCut khi đang cuộn danh sách kênh."""
 
@@ -194,6 +210,7 @@ class DownloadCardWidget(QFrame):
         self._on_capcut = on_capcut_fn
         self._on_dismiss = on_dismiss_fn
         self._video_url = f"https://www.youtube.com/watch?v={video_id}"
+        self._channel_id = ""
 
         self._raw_title = ""
         self._raw_status = ""
@@ -221,9 +238,10 @@ class DownloadCardWidget(QFrame):
         lay.setContentsMargins(8, 6, 10, 6)
         lay.setSpacing(10)
 
-        # 1. Ảnh Thumbnail Mini-HD 84x48 gọn gàng
-        self.lbl_thumb = QLabel()
+        # 1. Ảnh Thumbnail Mini-HD 84x48 gọn gàng (Click mở thẳng video trên YouTube)
+        self.lbl_thumb = _ClickableLabel(on_click=self._open_youtube_video)
         self.lbl_thumb.setFixedSize(self.THUMB_W, self.THUMB_H)
+        self.lbl_thumb.setToolTip("🔗 Bấm để mở xem video này trên YouTube")
         self.lbl_thumb.setPixmap(make_rounded_thumbnail(None, self.THUMB_W, self.THUMB_H))
         lay.addWidget(self.lbl_thumb)
 
@@ -247,17 +265,24 @@ class DownloadCardWidget(QFrame):
         )
         top_row.addWidget(self.lbl_note)
 
-        self.lbl_channel = QLabel("📺 YouTube")
-        self.lbl_channel.setStyleSheet("color: #CBD5E1; font-size: 11.5px; font-weight: 800;")
+        self.lbl_channel = _ClickableLabel("📺 YouTube", on_click=self._open_youtube_channel)
+        self.lbl_channel.setToolTip("🔗 Bấm để mở kênh YouTube này")
+        self.lbl_channel.setStyleSheet(
+            "QLabel { color: #CBD5E1; font-size: 11.5px; font-weight: 800; }"
+            "QLabel:hover { color: #38BDF8; }"
+        )
         top_row.addWidget(self.lbl_channel)
 
         lbl_dot = QLabel("•")
         lbl_dot.setStyleSheet("color: #64748B; font-size: 11px; font-weight: 800;")
         top_row.addWidget(lbl_dot)
 
-        self.lbl_title = QLabel("Đang lấy thông tin video...")
+        self.lbl_title = _ClickableLabel("Đang lấy thông tin video...", on_click=self._open_youtube_video)
         self.lbl_title.setMinimumWidth(80)
-        self.lbl_title.setStyleSheet("color: #FFFFFF; font-size: 12.5px; font-weight: 800;")
+        self.lbl_title.setStyleSheet(
+            "QLabel { color: #FFFFFF; font-size: 12.5px; font-weight: 800; }"
+            "QLabel:hover { color: #38BDF8; text-decoration: underline; }"
+        )
         top_row.addWidget(self.lbl_title, 1)
         mid.addLayout(top_row)
 
@@ -302,7 +327,7 @@ class DownloadCardWidget(QFrame):
             self._last_title_key = t_key
             fm = QFontMetrics(self.lbl_title.font())
             self.lbl_title.setText(fm.elidedText(self._raw_title, Qt.TextElideMode.ElideRight, avail_title))
-            self.lbl_title.setToolTip(self._raw_title)
+            self.lbl_title.setToolTip(f"{self._raw_title}\n🔗 Bấm vào tiêu đề hoặc ảnh để mở xem trên YouTube")
         if self._raw_status:
             fms = QFontMetrics(self.lbl_status.font())
             self.lbl_status.setText(fms.elidedText(self._raw_status, Qt.TextElideMode.ElideRight, avail_status))
@@ -312,6 +337,7 @@ class DownloadCardWidget(QFrame):
         self._raw_title = task.get("title") or self.video_id
         self._raw_status = task.get("status_text") or ""
         self._video_url = task.get("url") or f"https://www.youtube.com/watch?v={self.video_id}"
+        self._channel_id = (task.get("channel_id") or "").strip()
 
         ch_name = task.get("channel") or "YouTube"
         if len(ch_name) > 24:
@@ -445,6 +471,26 @@ class DownloadCardWidget(QFrame):
                     f"1-Click đưa thẳng video này vào Mẫu '{val}' trong CapCut (giữ thông số mẫu + thay Title + giữ PART 1)!"
                 )
 
+    def _open_youtube_video(self):
+        target = self._video_url or (f"https://www.youtube.com/watch?v={self.video_id}" if self.video_id else "")
+        if target:
+            webbrowser.open(target)
+
+    def _open_youtube_channel(self):
+        if self._channel_id:
+            webbrowser.open(f"https://www.youtube.com/channel/{self._channel_id}")
+        else:
+            self._open_youtube_video()
+
+    def _make_youtube_btn(self) -> QPushButton:
+        btn_yt = QPushButton("↗")
+        btn_yt.setObjectName("SubtleIconBtn")
+        btn_yt.setFixedSize(28, 26)
+        btn_yt.setToolTip("Mở xem video này trên YouTube")
+        btn_yt.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_yt.clicked.connect(self._open_youtube_video)
+        return btn_yt
+
     def _make_tiktok_btn(self) -> QPushButton:
         btn_tt = QPushButton("🔍 TikTok")
         btn_tt.setObjectName("TikTokSearchBtn")
@@ -514,6 +560,7 @@ class DownloadCardWidget(QFrame):
             self.action_lay.addWidget(btn_drag)
             self.action_lay.addWidget(btn_folder)
             self.action_lay.addWidget(btn_tt)
+            self.action_lay.addWidget(self._make_youtube_btn())
             self.action_lay.addWidget(btn_copy)
 
         elif mode == "server_feed":
@@ -527,14 +574,7 @@ class DownloadCardWidget(QFrame):
             btn_dl.setCursor(Qt.CursorShape.PointingHandCursor)
             btn_dl.clicked.connect(lambda: self._on_retry(self.video_id))
             self.action_lay.addWidget(btn_dl)
-
-            btn_yt = QPushButton("↗")
-            btn_yt.setObjectName("SubtleIconBtn")
-            btn_yt.setFixedSize(28, 26)
-            btn_yt.setToolTip("Mở xem video này trên YouTube")
-            btn_yt.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn_yt.clicked.connect(lambda: webbrowser.open(self._video_url) if self._video_url else None)
-            self.action_lay.addWidget(btn_yt)
+            self.action_lay.addWidget(self._make_youtube_btn())
 
         elif mode == "skipped":
             self.action_lay.addWidget(self._make_tiktok_btn())
@@ -544,6 +584,7 @@ class DownloadCardWidget(QFrame):
             btn_dl.setCursor(Qt.CursorShape.PointingHandCursor)
             btn_dl.clicked.connect(lambda: self._on_retry(self.video_id))
             self.action_lay.addWidget(btn_dl)
+            self.action_lay.addWidget(self._make_youtube_btn())
 
         else:
             self.action_lay.addWidget(self._make_tiktok_btn())
@@ -552,6 +593,7 @@ class DownloadCardWidget(QFrame):
             btn_retry.setCursor(Qt.CursorShape.PointingHandCursor)
             btn_retry.clicked.connect(lambda: self._on_retry(self.video_id))
             self.action_lay.addWidget(btn_retry)
+            self.action_lay.addWidget(self._make_youtube_btn())
 
     def _trigger_capcut(self):
         if not self._on_capcut or self._btn_cc_ref is None:

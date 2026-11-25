@@ -984,6 +984,7 @@ class SniperMainWindow(QMainWindow):
                     accent="#E11D48",
                     thumb_bytes=self.downloader.get_cached_thumbnail(vid),
                     duration_ms=7500,
+                    video_url=url,
                 )
                 pop.show()
 
@@ -1319,6 +1320,7 @@ class SniperMainWindow(QMainWindow):
                 file_path=task.get("file_path") or "",
                 thumb_bytes=self.downloader.get_cached_thumbnail(vid),
                 duration_ms=11000,
+                video_url=task.get("url") or (f"https://www.youtube.com/watch?v={vid}" if vid else ""),
             )
             pop.show()
         self._refresh_disk_space()
@@ -1337,6 +1339,7 @@ class SniperMainWindow(QMainWindow):
                 accent="#F59E0B",
                 thumb_bytes=self.downloader.get_cached_thumbnail(vid),
                 duration_ms=8500,
+                video_url=task.get("url") or (f"https://www.youtube.com/watch?v={vid}" if vid else ""),
             )
             pop.show()
 

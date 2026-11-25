@@ -31,9 +31,11 @@ class DesktopToastPopup(QWidget):
         file_path: str = "",
         thumb_bytes: bytes | None = None,
         duration_ms: int = 8500,
+        video_url: str = "",
     ):
         super().__init__(None)
         self.file_path = file_path
+        self.video_url = (video_url or "").strip()
         self.setWindowFlags(
             Qt.WindowType.Tool
             | Qt.WindowType.FramelessWindowHint
@@ -80,6 +82,14 @@ class DesktopToastPopup(QWidget):
         lbl_thumb = QLabel()
         lbl_thumb.setFixedSize(108, 61)
         lbl_thumb.setPixmap(make_rounded_thumbnail(thumb_bytes, 108, 61))
+        if self.video_url:
+            lbl_thumb.setCursor(Qt.CursorShape.PointingHandCursor)
+            lbl_thumb.setToolTip("🔗 Bấm để mở xem video trên YouTube")
+            lbl_thumb.mouseReleaseEvent = lambda ev: (
+                (webbrowser.open(self.video_url), self._dismiss())
+                if ev.button() == Qt.MouseButton.LeftButton
+                else None
+            )
         mid_row.addWidget(lbl_thumb)
 
         info_col = QVBoxLayout()
@@ -91,7 +101,20 @@ class DesktopToastPopup(QWidget):
         lbl_title = QLabel(video_title)
         lbl_title.setWordWrap(True)
         lbl_title.setMaximumHeight(38)
-        lbl_title.setStyleSheet("color: #E2E8F0; font-size: 12px; font-weight: 600;")
+        if self.video_url:
+            lbl_title.setCursor(Qt.CursorShape.PointingHandCursor)
+            lbl_title.setToolTip("🔗 Bấm để mở xem video trên YouTube")
+            lbl_title.setStyleSheet(
+                "QLabel { color: #E2E8F0; font-size: 12px; font-weight: 600; }"
+                "QLabel:hover { color: #38BDF8; text-decoration: underline; }"
+            )
+            lbl_title.mouseReleaseEvent = lambda ev: (
+                (webbrowser.open(self.video_url), self._dismiss())
+                if ev.button() == Qt.MouseButton.LeftButton
+                else None
+            )
+        else:
+            lbl_title.setStyleSheet("color: #E2E8F0; font-size: 12px; font-weight: 600;")
         info_col.addWidget(lbl_title)
         mid_row.addLayout(info_col, 1)
         lay.addLayout(mid_row)
@@ -115,6 +138,13 @@ class DesktopToastPopup(QWidget):
             tt_url = f"https://www.tiktok.com/search?q={urllib.parse.quote(video_title.strip())}"
             btn_tt.clicked.connect(lambda: (webbrowser.open(tt_url), self._dismiss()))
             btn_row.addWidget(btn_tt)
+
+        if self.video_url:
+            btn_yt = QPushButton("↗ YouTube")
+            btn_yt.setFixedHeight(30)
+            btn_yt.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn_yt.clicked.connect(lambda: (webbrowser.open(self.video_url), self._dismiss()))
+            btn_row.addWidget(btn_yt)
 
         if btn_row.count() > 0:
             lay.addLayout(btn_row)
