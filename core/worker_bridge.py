@@ -36,11 +36,16 @@ def _worker_entry_point(cmd_q: multiprocessing.Queue, evt_q: multiprocessing.Que
     from core.capcut_injector import (
         create_capcut_draft_from_template,
         set_custom_draft_root,
+        set_extra_selected_templates,
     )
     from core.history_store import HistoryStore
     from core.turbo_downloader import TurboDownloaderEngine
 
     set_custom_draft_root(cfg.get("capcut_draft_root", ""))
+    set_extra_selected_templates(
+        cfg.get("selected_capcut_templates") or [],
+        explicit_mode=bool(cfg.get("capcut_tpl_explicit_v2")),
+    )
     history = HistoryStore()
     engine = TurboDownloaderEngine(history, cfg)
 
@@ -94,6 +99,10 @@ def _worker_entry_point(cmd_q: multiprocessing.Queue, evt_q: multiprocessing.Que
             engine.request_thumbnail(data)
         elif cmd == "update_cfg":
             set_custom_draft_root(data.get("capcut_draft_root", ""))
+            set_extra_selected_templates(
+                data.get("selected_capcut_templates") or [],
+                explicit_mode=bool(data.get("capcut_tpl_explicit_v2")),
+            )
             engine.update_runtime_config(data)
         elif cmd == "capcut":
             threading.Thread(target=_run_capcut_job, args=(data,), daemon=True).start()

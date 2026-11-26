@@ -525,16 +525,18 @@ class ChannelsPage(QWidget):
 
 
 class CapCutTemplatesPage(QWidget):
-    """Màn hình 3: Tự đọc globalSetting & quét toàn bộ Project trên CapCut PC để chọn làm Mẫu hoặc lưu thành mau_1, mau_2..."""
+    """Màn hình 3: Tự đọc globalSetting & quét toàn bộ Project trên CapCut PC để tích chọn trực tiếp làm Mẫu."""
 
     def __init__(
         self,
         on_scan_capcut,
         on_pick_draft_root,
         on_open_capcut_draft_dir,
+        on_save_templates=None,
         parent=None,
     ):
         super().__init__(parent)
+        self._total_projs_cnt = 0
         lay = QVBoxLayout(self)
         lay.setContentsMargins(14, 10, 14, 8)
         lay.setSpacing(6)
@@ -549,6 +551,17 @@ class CapCutTemplatesPage(QWidget):
         head.addWidget(QLabel("•"))
         head.addWidget(self.lbl_sub)
         head.addStretch(1)
+
+        self.btn_save_tpl = QPushButton("💾 Lưu mẫu")
+        self.btn_save_tpl.setObjectName("DragActionBtn")
+        self.btn_save_tpl.setFixedHeight(27)
+        self.btn_save_tpl.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_save_tpl.setToolTip(
+            "Lưu danh sách các Project đã tích chọn làm Mẫu (dùng trực tiếp Project gốc, không nhân bản thêm Project mới)"
+        )
+        if on_save_templates:
+            self.btn_save_tpl.clicked.connect(on_save_templates)
+        head.addWidget(self.btn_save_tpl)
 
         self.btn_scan = QPushButton("🔄 Quét CapCut")
         self.btn_scan.setObjectName("CapCutBtn")
@@ -583,8 +596,8 @@ class CapCutTemplatesPage(QWidget):
         self.lbl_detected_root = QLabel("📍 Kho nháp CapCut (globalSetting): ...")
         self.lbl_detected_root.setStyleSheet("color: #7DD3FC; font-size: 11px; font-weight: 700;")
         lbl_g = QLabel(
-            "💡 Trên mỗi máy, bạn chỉ cần chỉnh sẵn Project trong CapCut PC của máy đó -> Bấm '🔄 Quét CapCut' -> "
-            "Gạt công tắc bật dùng trực tiếp HOẶC bấm '📌 Lưu thành mau_...' để tạo thành mau_1, mau_2, mau_3, mau_4!"
+            "💡 Tích chọn trực tiếp vào các Project CapCut bên dưới rồi bấm '💾 Lưu mẫu' — "
+            "Tool dùng thẳng Project gốc (giữ nguyên tên gốc, không bắt đặt tên lại và không copy tạo Project thừa)!"
         )
         lbl_g.setWordWrap(True)
         lbl_g.setStyleSheet("color: #E2E8F0; font-size: 11.5px; font-weight: 600;")
@@ -594,7 +607,7 @@ class CapCutTemplatesPage(QWidget):
 
         self.inp_search = QLineEdit()
         self.inp_search.setFixedHeight(27)
-        self.inp_search.setPlaceholderText("🔍 Tìm nhanh theo tên Project trên CapCut (VD: mau_1, 1125...)...")
+        self.inp_search.setPlaceholderText("🔍 Tìm nhanh theo tên Project trên CapCut...")
         self.inp_search.textChanged.connect(self._apply_search)
         lay.addWidget(self.inp_search)
 
@@ -613,22 +626,37 @@ class CapCutTemplatesPage(QWidget):
         self.proj_rows: list[CapCutProjectRowCard] = []
         self._last_proj_sig: list[tuple] | None = None
 
+    def update_selection_counts(self, active_cnt: int | None = None):
+        if active_cnt is None:
+            active_cnt = sum(1 for r in self.proj_rows if r.sw_use.isChecked())
+        self.lbl_sub.setText(
+            f"Đang chọn {active_cnt} Mẫu sẵn sàng  •  Quét thấy {self._total_projs_cnt} Project trong CapCut PC"
+        )
+        self.btn_save_tpl.setText(f"💾 Lưu mẫu ({active_cnt})" if active_cnt else "💾 Lưu mẫu")
+
     def populate_projects(
         self,
         projects: list[dict],
         selected_extra_set: set[str],
         on_toggle_tpl_fn,
-        on_clone_as_mau_fn,
         detected_root: str = "",
+        explicit_mode: bool = False,
     ):
         if detected_root:
             self.lbl_detected_root.setText(f"📍 Kho nháp CapCut đang quét: {detected_root}")
 
+        self._total_projs_cnt = len(projects)
         new_sig = [
             (
                 p.get("folder_name") or "",
+                p.get("template_key") or p.get("display_name") or "",
                 p.get("modified_str") or "",
-                bool(p.get("is_named_template")) or ((p.get("folder_name") or "") in selected_extra_set),
+                (
+                    (p.get("folder_name") or "") in selected_extra_set
+                    or (p.get("display_name") or "") in selected_extra_set
+                    or (p.get("template_key") or "") in selected_extra_set
+                    or ((not explicit_mode) and bool(p.get("is_named_template")))
+                ),
             )
             for p in projects
         ]
@@ -646,16 +674,21 @@ class CapCutTemplatesPage(QWidget):
             active_cnt = 0
             for p in projects:
                 fname = p.get("folder_name") or ""
-                is_sel = bool(p.get("is_named_template")) or (fname in selected_extra_set)
+                dname = p.get("display_name") or fname
+                tkey = p.get("template_key") or dname
+                is_sel = (
+                    (fname in selected_extra_set)
+                    or (dname in selected_extra_set)
+                    or (tkey in selected_extra_set)
+                    or ((not explicit_mode) and bool(p.get("is_named_template")))
+                )
                 if is_sel:
                     active_cnt += 1
-                row = CapCutProjectRowCard(p, is_sel, on_toggle_tpl_fn, on_clone_as_mau_fn)
+                row = CapCutProjectRowCard(p, is_sel, on_toggle_tpl_fn)
                 self.proj_rows.append(row)
                 self.list_lay.insertWidget(self.list_lay.count() - 1, row)
 
-            self.lbl_sub.setText(
-                f"Đang kích hoạt {active_cnt} Mẫu sẵn sàng  •  Quét thấy {len(projects)} Project trong CapCut PC"
-            )
+            self.update_selection_counts(active_cnt)
             self._apply_search()
         finally:
             self.list_host.setUpdatesEnabled(True)
@@ -663,7 +696,7 @@ class CapCutTemplatesPage(QWidget):
     def _apply_search(self):
         q = self.inp_search.text().strip().lower()
         for r in self.proj_rows:
-            hay = f"{r.display_name} {r.folder_name}".lower()
+            hay = f"{r.template_key} {r.display_name} {r.folder_name}".lower()
             r.setVisible((not q) or (q in hay))
 
 

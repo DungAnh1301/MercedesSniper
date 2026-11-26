@@ -154,11 +154,14 @@ def find_capcut_exe() -> str:
 
 
 _EXTRA_SELECTED_TEMPLATES: list[str] = []
+_EXPLICIT_SELECTION_MODE: bool = False
 _PROJECT_SPEC_CACHE: dict[tuple[str, int], str] = {}
 
 
-def set_extra_selected_templates(names: list[str] | None):
-    global _EXTRA_SELECTED_TEMPLATES
+def set_extra_selected_templates(names: list[str] | None, explicit_mode: bool | None = None):
+    global _EXTRA_SELECTED_TEMPLATES, _EXPLICIT_SELECTION_MODE
+    if explicit_mode is not None:
+        _EXPLICIT_SELECTION_MODE = bool(explicit_mode)
     if not names:
         _EXTRA_SELECTED_TEMPLATES = []
     else:
@@ -325,6 +328,7 @@ def scan_all_capcut_projects() -> list[dict]:
             {
                 "folder_name": name,
                 "display_name": disp_name,
+                "template_key": disp_name,
                 "is_named_template": is_tpl,
                 "cover_path": cover,
                 "modified_ts": mtime,
@@ -333,10 +337,31 @@ def scan_all_capcut_projects() -> list[dict]:
             }
         )
 
+    disp_counts: dict[str, int] = {}
+    for p in projects:
+        k_low = (p["display_name"] or "").strip().lower()
+        disp_counts[k_low] = disp_counts.get(k_low, 0) + 1
+    for p in projects:
+        d_name = (p["display_name"] or "").strip()
+        f_name = (p["folder_name"] or "").strip()
+        if disp_counts.get(d_name.lower(), 0) > 1 and d_name.lower() != f_name.lower():
+            p["template_key"] = f"{d_name} ({f_name})"
+        else:
+            p["template_key"] = d_name or f_name
+
+    chosen_now = set(_EXTRA_SELECTED_TEMPLATES)
     projects.sort(
         key=lambda p: (
-            0 if p["is_named_template"] else 1,
-            _natural_sort_key(p["folder_name"]) if p["is_named_template"] else [-p["modified_ts"]],
+            0
+            if (
+                p["folder_name"] in chosen_now
+                or p["display_name"] in chosen_now
+                or p["template_key"] in chosen_now
+                or (not _EXPLICIT_SELECTION_MODE and p["is_named_template"])
+            )
+            else 1,
+            -p["modified_ts"],
+            _natural_sort_key(p["template_key"]),
         )
     )
     return projects
@@ -448,38 +473,64 @@ def clone_or_import_capcut_template(src_folder_or_path: str, target_template_nam
         return False, f"Lỗi khi tạo mẫu '{clean_name}': {e}", ""
 
 
-def list_capcut_templates(extra_selected: list[str] | None = None) -> list[str]:
-    """
-    Trả về danh sách toàn bộ Mẫu CapCut sẵn sàng để chọn:
-    - Tự động gồm mọi project đặt tên `mau_1`, `mau_2`...
-    - Cộng thêm mọi Project CapCut bất kỳ mà người dùng đã bật chọn trong tab `✂️ Kho Mẫu CapCut`.
-    """
+def resolve_capcut_template_dir(template_name: str) -> str:
+    """Tìm đường dẫn thư mục Project gốc trên CapCut theo tên hiển thị hoặc tên thư mục."""
+    t_name = (template_name or "").strip()
+    if not t_name or t_name == BLANK_TEMPLATE_KEY:
+        return ""
     root = get_capcut_draft_root()
     if not os.path.isdir(root):
+        return ""
+    direct = os.path.join(root, t_name)
+    if os.path.isdir(direct) and os.path.isfile(os.path.join(direct, "draft_content.json")):
+        return direct
+    low_target = t_name.lower()
+    for p in scan_all_capcut_projects():
+        keys = (
+            str(p.get("template_key") or "").strip(),
+            str(p.get("display_name") or "").strip(),
+            str(p.get("folder_name") or "").strip(),
+        )
+        if t_name in keys or any(k.lower() == low_target for k in keys if k):
+            cand = os.path.join(root, p["folder_name"])
+            if os.path.isdir(cand) and os.path.isfile(os.path.join(cand, "draft_content.json")):
+                return cand
+    return ""
+
+
+def list_capcut_templates(
+    extra_selected: list[str] | None = None,
+    explicit_mode: bool | None = None,
+    scanned_projects: list[dict] | None = None,
+) -> list[str]:
+    """
+    Trả về danh sách các Project CapCut đã được tích chọn làm Mẫu (dùng trực tiếp Project gốc, không nhân bản):
+    - Ở chế độ `explicit_mode=True`: chỉ lấy đúng các Project người dùng đã tích chọn.
+    - Ở chế độ cũ (`explicit_mode=False`): tự động giữ các mẫu cũ `mau_1`, `mau_2`... để tương thích ngược.
+    """
+    use_explicit = _EXPLICIT_SELECTION_MODE if explicit_mode is None else bool(explicit_mode)
+    if extra_selected is not None:
+        chosen_set = {str(x).strip() for x in extra_selected if str(x or "").strip()}
+    else:
+        chosen_set = set(_EXTRA_SELECTED_TEMPLATES)
+
+    projs = scan_all_capcut_projects() if scanned_projects is None else scanned_projects
+    if not projs:
         return []
 
-    chosen_extra = set(_EXTRA_SELECTED_TEMPLATES)
-    if extra_selected:
-        for x in extra_selected:
-            if x:
-                chosen_extra.add(str(x).strip())
+    selected_keys: list[str] = []
+    for p in projs:
+        fname = str(p.get("folder_name") or "").strip()
+        dname = str(p.get("display_name") or fname).strip()
+        tkey = str(p.get("template_key") or dname or fname).strip()
+        is_picked = (fname in chosen_set) or (dname in chosen_set) or (tkey in chosen_set)
+        if not is_picked and (not use_explicit) and bool(p.get("is_named_template")):
+            is_picked = True
+        if is_picked and tkey and tkey not in selected_keys:
+            selected_keys.append(tkey)
 
-    named_tpls = []
-    extra_tpls = []
-    for name in os.listdir(root):
-        if _is_ignored_draft_folder(name):
-            continue
-        full = os.path.join(root, name)
-        if not (os.path.isdir(full) and os.path.isfile(os.path.join(full, "draft_content.json"))):
-            continue
-        if _is_template_folder_name(name):
-            named_tpls.append(name)
-        elif name in chosen_extra:
-            extra_tpls.append(name)
-
-    named_tpls.sort(key=_natural_sort_key)
-    extra_tpls.sort(key=_natural_sort_key)
-    return named_tpls + extra_tpls
+    selected_keys.sort(key=_natural_sort_key)
+    return selected_keys
 
 
 def _resolve_ffmpeg_tools() -> tuple[str, str | None]:
@@ -686,49 +737,89 @@ def _update_title_text_materials(texts: list[dict], new_title: str) -> bool:
         return False
 
 
-def has_visible_capcut_window() -> bool:
+def inspect_capcut_windows() -> dict:
+    """
+    Kiểm tra siêu tốc (<1ms qua Win32 API, không gọi tasklist.exe) trạng thái cửa sổ CapCut PC:
+    - Phân biệt rõ Màn hình chờ chọn dự án (`home_hwnd`, title == 'CapCut' / class 'HomePage*')
+      với Cửa sổ đang mở chỉnh sửa Timeline (`has_editor`, title là tên Project / class 'MainWindow*').
+    """
+    info = {
+        "has_visible": False,
+        "has_editor": False,
+        "home_hwnd": 0,
+        "editor_hwnd": 0,
+        "editor_title": "",
+    }
     if os.name != "nt":
-        return False
+        return info
     try:
         import ctypes
         from ctypes import wintypes
 
-        res = subprocess.run(
-            ["tasklist", "/FI", "IMAGENAME eq CapCut.exe", "/FO", "CSV", "/NH"],
-            capture_output=True,
-            text=True,
-            timeout=4,
-            creationflags=CREATE_NO_WINDOW,
-        )
-        cc_pids = set()
-        for line in (res.stdout or "").splitlines():
-            parts = [p.strip('"') for p in line.split('","')]
-            if len(parts) >= 2 and parts[0].lower() == "capcut.exe" and parts[1].isdigit():
-                cc_pids.add(int(parts[1]))
-        if not cc_pids:
-            return False
-
-        user32 = ctypes.windll.user32
-        found_visible = False
+        u32 = ctypes.windll.user32
+        k32 = ctypes.windll.kernel32
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
         WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+        pid_is_cc: dict[int, bool] = {}
+
+        def _is_capcut_pid(pid_val: int) -> bool:
+            if pid_val in pid_is_cc:
+                return pid_is_cc[pid_val]
+            hproc = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid_val)
+            if not hproc:
+                pid_is_cc[pid_val] = False
+                return False
+            try:
+                buf = ctypes.create_unicode_buffer(512)
+                sz = wintypes.DWORD(512)
+                ok = k32.QueryFullProcessImageNameW(hproc, 0, buf, ctypes.byref(sz))
+                is_cc = bool(ok) and buf.value.lower().endswith("\\capcut.exe")
+                pid_is_cc[pid_val] = is_cc
+                return is_cc
+            finally:
+                k32.CloseHandle(hproc)
 
         def _cb(hwnd, _lparam):
-            nonlocal found_visible
-            if user32.IsWindowVisible(hwnd):
-                pid = wintypes.DWORD()
-                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-                if pid.value in cc_pids:
-                    rect = wintypes.RECT()
-                    user32.GetWindowRect(hwnd, ctypes.byref(rect))
-                    if (rect.right - rect.left) > 200 and (rect.bottom - rect.top) > 200:
-                        found_visible = True
-                        return False
+            if not u32.IsWindowVisible(hwnd):
+                return True
+            rect = wintypes.RECT()
+            u32.GetWindowRect(hwnd, ctypes.byref(rect))
+            if (rect.right - rect.left) < 520 or (rect.bottom - rect.top) < 380:
+                return True
+            pid = wintypes.DWORD()
+            u32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if not pid.value or not _is_capcut_pid(pid.value):
+                return True
+
+            t_buf = ctypes.create_unicode_buffer(256)
+            c_buf = ctypes.create_unicode_buffer(128)
+            u32.GetWindowTextW(hwnd, t_buf, 256)
+            u32.GetClassNameW(hwnd, c_buf, 128)
+            title = (t_buf.value or "").strip()
+            cls_name = (c_buf.value or "").strip()
+
+            info["has_visible"] = True
+            if cls_name.startswith("HomePage") or title.lower() == "capcut":
+                info["home_hwnd"] = int(hwnd)
+            elif title or cls_name.startswith("MainWindow"):
+                info["has_editor"] = True
+                info["editor_hwnd"] = int(hwnd)
+                info["editor_title"] = title or "Timeline"
             return True
 
-        user32.EnumWindows(WNDENUMPROC(_cb), 0)
-        return found_visible
+        u32.EnumWindows(WNDENUMPROC(_cb), 0)
     except Exception:
-        return False
+        pass
+    return info
+
+
+def has_visible_capcut_window() -> bool:
+    return bool(inspect_capcut_windows().get("has_visible"))
+
+
+def has_active_capcut_editor_window() -> tuple[bool, str]:
+    st = inspect_capcut_windows()
+    return bool(st.get("has_editor")), str(st.get("editor_title") or "")
 
 
 def restart_or_launch_capcut(force_restart: bool = False):
@@ -736,8 +827,9 @@ def restart_or_launch_capcut(force_restart: bool = False):
     if not cc_exe:
         return
 
-    visible = has_visible_capcut_window()
-    if force_restart or not visible:
+    st = inspect_capcut_windows()
+    # Nếu CapCut đang tắt, ẩn ngầm ở khay, hoặc chỉ đang đứng ở màn hình chờ chọn Project (Home) -> làm mới luôn!
+    if force_restart or not st["has_visible"] or (st["home_hwnd"] and not st["has_editor"]):
         subprocess.run(
             ["taskkill", "/F", "/IM", "CapCut.exe"],
             capture_output=True,
@@ -747,6 +839,145 @@ def restart_or_launch_capcut(force_restart: bool = False):
         time.sleep(0.35)
 
     subprocess.Popen([cc_exe], close_fds=True)
+
+
+def auto_open_latest_capcut_project(timeout_sec: float = 13.0) -> bool:
+    """
+    Tự động đợi màn hình chọn Project (HomePage) của CapCut hiện lên và click mở thẳng
+    vào Project vừa tạo (nằm ở vị trí đầu tiên #1 bên trái danh sách Dự án),
+    sau đó trả con trỏ chuột về đúng vị trí cũ trong tích tắc (<35ms)!
+    """
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        u32 = ctypes.windll.user32
+        k32 = ctypes.windll.kernel32
+
+        class CURSORINFO(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", wintypes.DWORD),
+                ("flags", wintypes.DWORD),
+                ("hCursor", wintypes.HANDLE),
+                ("ptScreenPos", wintypes.POINT),
+            ]
+
+        def _force_foreground(hwnd: int):
+            fg = u32.GetForegroundWindow()
+            cur_tid = k32.GetCurrentThreadId()
+            fg_tid = u32.GetWindowThreadProcessId(fg, None) if fg else 0
+            target_tid = u32.GetWindowThreadProcessId(hwnd, None)
+            attached_fg = False
+            attached_tg = False
+            try:
+                if fg_tid and fg_tid != cur_tid:
+                    attached_fg = bool(u32.AttachThreadInput(cur_tid, fg_tid, True))
+                if target_tid and target_tid != cur_tid:
+                    attached_tg = bool(u32.AttachThreadInput(cur_tid, target_tid, True))
+                if u32.IsIconic(hwnd):
+                    u32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                u32.BringWindowToTop(hwnd)
+                u32.SetForegroundWindow(hwnd)
+            finally:
+                if attached_tg:
+                    u32.AttachThreadInput(cur_tid, target_tid, False)
+                if attached_fg:
+                    u32.AttachThreadInput(cur_tid, fg_tid, False)
+
+        # 1. Chờ cửa sổ Home của CapCut xuất hiện trên màn hình
+        deadline = time.monotonic() + timeout_sec
+        home_hwnd = 0
+        while time.monotonic() < deadline:
+            st = inspect_capcut_windows()
+            if st.get("has_editor") and not st.get("home_hwnd"):
+                return True
+            if st.get("home_hwnd"):
+                home_hwnd = int(st["home_hwnd"])
+                break
+            time.sleep(0.16)
+
+        if not home_hwnd:
+            return False
+
+        # 2. Chờ danh sách dự án trên QML HomePageX render xong thẻ đầu tiên (#1)
+        time.sleep(1.25)
+        if not u32.IsWindowVisible(home_hwnd):
+            return True
+
+        _force_foreground(home_hwnd)
+        time.sleep(0.10)
+
+        dpi = u32.GetDpiForWindow(home_hwnd) if hasattr(u32, "GetDpiForWindow") else 96
+        scale = (float(dpi) / 96.0) if dpi and dpi > 0 else 1.0
+        h_hand = u32.LoadCursorW(0, 32649)  # IDC_HAND (PointingHandCursor của thẻ Project QML)
+
+        # Tọa độ chuẩn trích xuất từ mã nguồn QML của CapCut 9.x (`HomePageX.qml` + `HomePageLocalInspector.qml`):
+        # - Cột trái `leftRect` rộng 216px, lưới `projectGrid` cách lề 20..24px -> X=288 luôn trúng tâm thẻ #1 (cả Grid & List).
+        # - Chiều dọc thẻ #1 bắt đầu từ Y=310..495 tùy chế độ khung công cụ -> dò con trỏ bàn tay IDC_HAND trước khi click!
+        logical_x = 288
+        probe_ys = [368, 418, 468, 332]
+
+        rect = wintypes.RECT()
+        u32.GetWindowRect(home_hwnd, ctypes.byref(rect))
+        orig_pt = wintypes.POINT()
+        u32.GetCursorPos(ctypes.byref(orig_pt))
+
+        best_ys = list(probe_ys)
+        detected_hand_y = None
+        try:
+            for py in probe_ys:
+                px = rect.left + int(logical_x * scale)
+                py_phys = rect.top + int(py * scale)
+                u32.SetCursorPos(px, py_phys)
+                time.sleep(0.025)
+                ci = CURSORINFO(ctypes.sizeof(CURSORINFO))
+                if u32.GetCursorInfo(ctypes.byref(ci)) and ci.hCursor == h_hand:
+                    detected_hand_y = py
+                    break
+        finally:
+            u32.SetCursorPos(orig_pt.x, orig_pt.y)
+
+        if detected_hand_y is not None:
+            best_ys = [detected_hand_y] + [y for y in probe_ys if y != detected_hand_y]
+
+        MOUSEEVENTF_LEFTDOWN = 0x0002
+        MOUSEEVENTF_LEFTUP = 0x0004
+
+        # 3. Click vào Project #1 và xác nhận CapCut đã chuyển sang cửa sổ Timeline Editor
+        for y_cand in best_ys[:3]:
+            st_now = inspect_capcut_windows()
+            if st_now.get("has_editor") or not st_now.get("home_hwnd"):
+                return True
+
+            cur_hwnd = int(st_now["home_hwnd"])
+            _force_foreground(cur_hwnd)
+            u32.GetWindowRect(cur_hwnd, ctypes.byref(rect))
+            u32.GetCursorPos(ctypes.byref(orig_pt))
+
+            tx = rect.left + int(logical_x * scale)
+            ty = rect.top + int(y_cand * scale)
+
+            u32.SetCursorPos(tx, ty)
+            time.sleep(0.035)
+            u32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+            time.sleep(0.035)
+            u32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+            time.sleep(0.02)
+            u32.SetCursorPos(orig_pt.x, orig_pt.y)
+
+            # Chờ tối đa 1.25s xem cửa sổ Home đã đóng / chuyển sang Timeline chưa
+            wait_until = time.monotonic() + 1.25
+            while time.monotonic() < wait_until:
+                time.sleep(0.15)
+                st_after = inspect_capcut_windows()
+                if st_after.get("has_editor") or not st_after.get("home_hwnd"):
+                    return True
+
+        return False
+    except Exception:
+        return False
 
 
 def _patch_mini_draft_in_place(
@@ -1291,15 +1522,13 @@ def create_capcut_draft_from_template(
     use_blank = (not template_name) or (template_name == BLANK_TEMPLATE_KEY)
     tpl_dir = ""
     if not use_blank:
-        cand_dir = os.path.join(draft_root, template_name)
-        if os.path.isdir(cand_dir) and os.path.isfile(os.path.join(cand_dir, "draft_content.json")):
-            tpl_dir = cand_dir
-        else:
+        tpl_dir = resolve_capcut_template_dir(template_name)
+        if not tpl_dir:
             avail = list_capcut_templates()
             if avail:
                 template_name = avail[0]
-                tpl_dir = os.path.join(draft_root, template_name)
-            else:
+                tpl_dir = resolve_capcut_template_dir(template_name)
+            if not tpl_dir:
                 use_blank = True
 
     media = probe_video_media_info(video_path)

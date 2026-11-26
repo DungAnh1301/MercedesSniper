@@ -776,25 +776,26 @@ class SettingSectionCard(QFrame):
 
 
 class CapCutProjectRowCard(QFrame):
-    """Thanh Project CapCut quét trực tiếp từ máy (48px gọn gàng): bật dùng làm Mẫu hoặc lưu thành mau_1, mau_2..."""
+    """Thanh Project CapCut quét trực tiếp từ máy (48px gọn gàng): tích chọn trực tiếp làm Mẫu (0 copy, 0 đặt tên lại)."""
 
     def __init__(
         self,
         proj: dict,
         is_selected_tpl: bool,
         on_toggle_tpl_fn,
-        on_clone_as_mau_fn,
         parent=None,
     ):
         super().__init__(parent)
         self.proj = proj
         self.folder_name = proj.get("folder_name") or ""
         self.display_name = proj.get("display_name") or self.folder_name
-        self.is_named_tpl = bool(proj.get("is_named_template"))
+        self.template_key = proj.get("template_key") or self.display_name
+        self._on_toggle_tpl = on_toggle_tpl_fn
 
         self.setFixedHeight(48)
         self.setObjectName("StudioCard")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
 
         lay = QHBoxLayout(self)
         lay.setContentsMargins(9, 5, 9, 5)
@@ -819,17 +820,12 @@ class CapCutProjectRowCard(QFrame):
         lbl_cov.setPixmap(pix)
         lay.addWidget(lbl_cov)
 
-        # 2. Công tắc Bật dùng trong danh sách Mẫu
+        # 2. Công tắc Tích chọn dùng trực tiếp làm Mẫu
         self.sw_use = ToggleSwitch(
-            checked=(True if self.is_named_tpl else is_selected_tpl),
-            active_color="#38BDF8" if self.is_named_tpl else "#10B981",
+            checked=bool(is_selected_tpl),
+            active_color="#10B981",
         )
-        if self.is_named_tpl:
-            self.sw_use.setEnabled(False)
-            self.sw_use.setToolTip("Project đặt tên chuẩn Mẫu (mau_1, mau_2...) luôn tự động hiện trong danh sách chọn Mẫu!")
-        else:
-            self.sw_use.setToolTip("Bật để đưa thẳng Project CapCut này vào ô chọn Mẫu trên toàn Tool!")
-            self.sw_use.toggled.connect(lambda chk: on_toggle_tpl_fn(self.folder_name, chk))
+        self.sw_use.setToolTip("Tích chọn để dùng trực tiếp Project CapCut này làm Mẫu (không tạo bản sao)")
         lay.addWidget(self.sw_use)
 
         # 3. Tên Project + Thông số kỹ thuật
@@ -841,20 +837,10 @@ class CapCutProjectRowCard(QFrame):
         top_r.setContentsMargins(0, 0, 0, 0)
         top_r.setSpacing(6)
 
-        lbl_badge = QLabel("★ MẪU CHUẨN" if self.is_named_tpl else "🎬 CAPCUT")
-        if self.is_named_tpl:
-            lbl_badge.setStyleSheet(
-                "background-color: #38BDF8; color: #020617; border-radius: 4px; "
-                "padding: 1px 6px; font-size: 10px; font-weight: 900;"
-            )
-        else:
-            lbl_badge.setStyleSheet(
-                "background-color: #334155; color: #E2E8F0; border-radius: 4px; "
-                "padding: 1px 6px; font-size: 10px; font-weight: 800;"
-            )
-        top_r.addWidget(lbl_badge)
+        self.lbl_badge = QLabel()
+        top_r.addWidget(self.lbl_badge)
 
-        lbl_title = QLabel(self.display_name)
+        lbl_title = QLabel(self.template_key)
         lbl_title.setStyleSheet("color: #FFFFFF; font-size: 12.5px; font-weight: 800;")
         top_r.addWidget(lbl_title, 1)
         info_col.addLayout(top_r)
@@ -868,15 +854,54 @@ class CapCutProjectRowCard(QFrame):
 
         lay.addLayout(info_col, 1)
 
-        # 4. Nút Lưu / Nhân bản thành mau_1, mau_2, mau_3...
-        btn_txt = "📋 Nhân bản mẫu" if self.is_named_tpl else "📌 Lưu thành mau_..."
-        btn_clone = QPushButton(btn_txt)
-        if not self.is_named_tpl:
-            btn_clone.setObjectName("CapCutBtn")
-        btn_clone.setFixedHeight(26)
-        btn_clone.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_clone.setToolTip(
-            "Sao chép Project này thành một Mẫu độc lập (VD: mau_2, mau_3, mau_4...) để dùng lâu dài"
-        )
-        btn_clone.clicked.connect(lambda: on_clone_as_mau_fn(self.folder_name, self.display_name))
-        lay.addWidget(btn_clone)
+        # 4. Nút trạng thái tích chọn nhanh bên phải (0 hộp thoại, 0 copy thừa project)
+        self.btn_pick = QPushButton()
+        self.btn_pick.setFixedSize(116, 26)
+        self.btn_pick.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_pick.clicked.connect(lambda: self.sw_use.setChecked(not self.sw_use.isChecked()))
+        lay.addWidget(self.btn_pick)
+
+        self._sync_selected_visual(bool(is_selected_tpl))
+        self.sw_use.toggled.connect(self._on_switch_toggled)
+
+    def _on_switch_toggled(self, checked: bool):
+        self._sync_selected_visual(checked)
+        if self._on_toggle_tpl:
+            self._on_toggle_tpl(self.folder_name, checked)
+
+    def _sync_selected_visual(self, checked: bool):
+        if checked:
+            self.setStyleSheet(
+                "QFrame#StudioCard { background-color: #132A26; border: 1.5px solid #10B981; border-radius: 7px; }"
+            )
+            self.lbl_badge.setText("✓ ĐANG DÙNG")
+            self.lbl_badge.setStyleSheet(
+                "background-color: #10B981; color: #022C22; border-radius: 4px; "
+                "padding: 1px 6px; font-size: 10px; font-weight: 900;"
+            )
+            self.btn_pick.setText("✓ Đã chọn")
+            self.btn_pick.setStyleSheet(
+                "QPushButton { background-color: #059669; color: #FFFFFF; border: 1px solid #34D399; "
+                "border-radius: 5px; font-size: 11px; font-weight: 800; }"
+                "QPushButton:hover { background-color: #10B981; }"
+            )
+        else:
+            self.setStyleSheet("")
+            self.lbl_badge.setText("🎬 CAPCUT")
+            self.lbl_badge.setStyleSheet(
+                "background-color: #334155; color: #E2E8F0; border-radius: 4px; "
+                "padding: 1px 6px; font-size: 10px; font-weight: 800;"
+            )
+            self.btn_pick.setText("+ Chọn mẫu")
+            self.btn_pick.setStyleSheet(
+                "QPushButton { background-color: #0F172A; color: #CBD5E1; border: 1px solid #475569; "
+                "border-radius: 5px; font-size: 11px; font-weight: 700; }"
+                "QPushButton:hover { border-color: #10B981; color: #FFFFFF; }"
+            )
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.sw_use.setChecked(not self.sw_use.isChecked())
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)

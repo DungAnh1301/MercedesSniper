@@ -20,7 +20,6 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QFrame,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QMainWindow,
     QMenu,
@@ -34,14 +33,14 @@ from PyQt6.QtWidgets import (
 
 from core.capcut_injector import (
     BLANK_TEMPLATE_KEY,
-    clone_or_import_capcut_template,
+    auto_open_latest_capcut_project,
     get_capcut_draft_root,
+    has_active_capcut_editor_window,
     has_visible_capcut_window,
     list_capcut_templates,
     scan_all_capcut_projects,
     set_custom_draft_root,
     set_extra_selected_templates,
-    suggest_next_template_name,
 )
 from core.history_store import HistoryStore, extract_video_id
 from core.updater import (
@@ -115,7 +114,10 @@ class SniperMainWindow(QMainWindow):
         self._channels_sig: list[tuple] = []
         self._task_cache: dict[str, dict] = {}
         set_custom_draft_root(self.cfg.get("capcut_draft_root") or "")
-        set_extra_selected_templates(self.cfg.get("selected_capcut_templates") or [])
+        set_extra_selected_templates(
+            self.cfg.get("selected_capcut_templates") or [],
+            explicit_mode=bool(self.cfg.get("capcut_tpl_explicit_v2")),
+        )
         self._available_templates: list[str] = list_capcut_templates()
         self._force_quit = False
         self._tray_notified_once = False
@@ -285,6 +287,7 @@ class SniperMainWindow(QMainWindow):
             on_scan_capcut=lambda: self._handle_reload_capcut_templates(show_feedback=True),
             on_pick_draft_root=self._on_pick_custom_capcut_root,
             on_open_capcut_draft_dir=self._open_capcut_draft_dir,
+            on_save_templates=self._on_save_selected_capcut_templates,
         )
         self.page_rules = RulesPage(
             cfg=self.cfg,
@@ -544,19 +547,54 @@ class SniperMainWindow(QMainWindow):
         self._scan_in_progress = True
         custom_root = str(self.cfg.get("capcut_draft_root") or "")
         extra_sel = list(self.cfg.get("selected_capcut_templates") or [])
+        explicit_v2 = bool(self.cfg.get("capcut_tpl_explicit_v2"))
 
         def _bg_scan():
             try:
                 set_custom_draft_root(custom_root)
-                set_extra_selected_templates(extra_sel)
-                tpls = list_capcut_templates(extra_sel)
+                set_extra_selected_templates(extra_sel, explicit_mode=explicit_v2)
                 det_root = get_capcut_draft_root()
                 projs = scan_all_capcut_projects()
+                tpls = list_capcut_templates(extra_sel, explicit_mode=explicit_v2, scanned_projects=projs)
                 self.signals.sig_capcut_scan_ready.emit(tpls, projs, det_root, show_feedback)
             except Exception:
                 self._scan_in_progress = False
 
         threading.Thread(target=_bg_scan, daemon=True, name="CapCutBgScan").start()
+
+    def _migrate_and_normalize_capcut_selection(self, all_projs: list):
+        """Chuyển đổi mượt từ cơ chế cũ sang chọn trực tiếp 100% (không khóa mau_1, tự ánh xạ tên hiển thị)."""
+        changed_cfg = False
+        if not self.cfg.get("capcut_tpl_explicit_v2"):
+            seeded = [str(x).strip() for x in (self.cfg.get("selected_capcut_templates") or []) if str(x or "").strip()]
+            for p in all_projs:
+                if p.get("is_named_template"):
+                    fn = str(p.get("folder_name") or "").strip()
+                    if fn and fn not in seeded:
+                        seeded.append(fn)
+            self.cfg["selected_capcut_templates"] = seeded
+            self.cfg["capcut_tpl_explicit_v2"] = True
+            set_extra_selected_templates(seeded, explicit_mode=True)
+            changed_cfg = True
+
+        # Chuẩn hóa tên mẫu gắn trên các kênh nếu trước đó lưu theo folder_name khác với template_key
+        folder_to_key = {
+            str(p.get("folder_name") or ""): str(p.get("template_key") or p.get("display_name") or "")
+            for p in all_projs
+            if p.get("folder_name")
+        }
+        all_maps = self.cfg.get("channel_templates")
+        if isinstance(all_maps, dict):
+            for _u, cmap in all_maps.items():
+                if isinstance(cmap, dict):
+                    for k, v in list(cmap.items()):
+                        if v in folder_to_key and folder_to_key[v] and folder_to_key[v] != v:
+                            cmap[k] = folder_to_key[v]
+                            changed_cfg = True
+
+        if changed_cfg:
+            self._save_cfg(self.cfg)
+            self.downloader.update_runtime_config(self.cfg)
 
     def _ui_on_capcut_scan_ready(
         self,
@@ -566,10 +604,17 @@ class SniperMainWindow(QMainWindow):
         show_feedback: bool,
     ):
         self._scan_in_progress = False
-        tpls_changed = new_tpls != self._available_templates
-        self._available_templates = list(new_tpls)
         self._scanned_projs_cache = list(all_projs)
         self._scanned_root_cache = detected_root
+        self._migrate_and_normalize_capcut_selection(self._scanned_projs_cache)
+        new_tpls = list_capcut_templates(
+            self.cfg.get("selected_capcut_templates") or [],
+            explicit_mode=bool(self.cfg.get("capcut_tpl_explicit_v2")),
+            scanned_projects=self._scanned_projs_cache,
+        )
+
+        tpls_changed = new_tpls != self._available_templates
+        self._available_templates = list(new_tpls)
 
         if self.stack.currentIndex() == 2:
             self._render_templates_page_now()
@@ -588,9 +633,9 @@ class SniperMainWindow(QMainWindow):
 
         if show_feedback:
             cnt = len(self._available_templates)
-            names = ", ".join(self._available_templates) if cnt else "Chưa có mẫu (dùng Project trắng)"
+            names = ", ".join(self._available_templates) if cnt else "Chưa chọn mẫu (dùng Project trắng)"
             self._append_log(
-                f"✂️ Đã quét CapCut tại [{detected_root}] ({len(all_projs)} project • {cnt} mẫu): {names}"
+                f"✂️ Đã quét CapCut tại [{detected_root}] ({len(all_projs)} project • đang chọn {cnt} mẫu): {names}"
             )
             self.page_channels.btn_reload_tpl.setText(f"✓ Đã nạp ({cnt} mẫu)")
             self.page_templates.btn_scan.setText(f"✓ Đã quét ({len(all_projs)} project)")
@@ -602,41 +647,64 @@ class SniperMainWindow(QMainWindow):
                 ),
             )
 
+    def _sync_selected_templates_state(self, selected_folders: list[str]):
+        self.cfg["selected_capcut_templates"] = list(selected_folders)
+        self.cfg["capcut_tpl_explicit_v2"] = True
+        set_extra_selected_templates(selected_folders, explicit_mode=True)
+        self._save_cfg(self.cfg)
+        self.downloader.update_runtime_config(self.cfg)
+
+        new_tpls = list_capcut_templates(
+            selected_folders,
+            explicit_mode=True,
+            scanned_projects=self._scanned_projs_cache,
+        )
+        tpls_changed = new_tpls != self._available_templates
+        self._available_templates = list(new_tpls)
+        cnt = len(self._available_templates)
+        self.page_templates.update_selection_counts(cnt)
+        self.page_queue.update_tpl_button_count(cnt)
+        self.nav_templates.set_badge(cnt, highlight=False)
+        if tpls_changed:
+            if self.page_channels.row_widgets:
+                self.page_channels.refresh_template_dropdowns(
+                    self._available_templates,
+                    self._get_channel_tpl_map(),
+                )
+            self._refresh_all_cards_capcut_labels()
+
     def _on_toggle_extra_capcut_tpl(self, folder_name: str, checked: bool):
+        aliases = {folder_name}
+        for p in self._scanned_projs_cache:
+            if p.get("folder_name") == folder_name:
+                if p.get("display_name"):
+                    aliases.add(str(p["display_name"]))
+                if p.get("template_key"):
+                    aliases.add(str(p["template_key"]))
+                break
+
         cur = [str(x) for x in (self.cfg.get("selected_capcut_templates") or []) if x]
         if checked:
             if folder_name not in cur:
                 cur.append(folder_name)
         else:
-            cur = [x for x in cur if x != folder_name]
-        self.cfg["selected_capcut_templates"] = cur
-        set_extra_selected_templates(cur)
-        self._save_cfg(self.cfg)
-        self._handle_reload_capcut_templates(show_feedback=False)
+            cur = [x for x in cur if x not in aliases]
+        self._sync_selected_templates_state(cur)
 
-    def _on_clone_project_as_mau(self, src_folder_or_path: str, display_label: str):
-        suggested = suggest_next_template_name()
-        chosen, ok = QInputDialog.getText(
-            self,
-            "Lưu thành Mẫu CapCut chuẩn",
-            f"Đặt tên cho Mẫu mới sao chép từ '{display_label}'\n"
-            "(Gợi ý đặt tên mau_1, mau_2, mau_3, mau_4... để dễ chọn trên nút CapCut):",
-            text=suggested,
-        )
-        if not ok or not chosen.strip():
-            return
-        success, msg, saved_name = clone_or_import_capcut_template(src_folder_or_path, chosen.strip())
-        if success:
-            if saved_name not in (self.cfg.get("selected_capcut_templates") or []):
-                cur = list(self.cfg.get("selected_capcut_templates") or [])
-                cur.append(saved_name)
-                self.cfg["selected_capcut_templates"] = cur
-                self._save_cfg(self.cfg)
-            self._handle_reload_capcut_templates(show_feedback=False)
-            self._append_log(f"✅ {msg}")
-            QMessageBox.information(self, "Kho Mẫu CapCut", msg)
+    def _on_save_selected_capcut_templates(self):
+        if self.page_templates.proj_rows:
+            cur = [r.folder_name for r in self.page_templates.proj_rows if r.sw_use.isChecked() and r.folder_name]
         else:
-            QMessageBox.warning(self, "Lỗi tạo Mẫu", msg)
+            cur = [str(x) for x in (self.cfg.get("selected_capcut_templates") or []) if x]
+        self._sync_selected_templates_state(cur)
+        cnt = len(self._available_templates)
+        names = ", ".join(self._available_templates) if cnt else "Project trắng"
+        self._append_log(f"✅ Đã lưu {cnt} mẫu CapCut (dùng trực tiếp Project gốc, không tạo bản sao): {names}")
+        self.page_templates.btn_save_tpl.setText(f"✓ Đã lưu ({cnt} mẫu)!")
+        QTimer.singleShot(
+            1400,
+            lambda: self.page_templates.update_selection_counts(len(self._available_templates)),
+        )
 
     def _on_pick_custom_capcut_root(self):
         cur_ov = (self.cfg.get("capcut_draft_root") or "").strip()
@@ -751,8 +819,8 @@ class SniperMainWindow(QMainWindow):
             projects=self._scanned_projs_cache,
             selected_extra_set=extra_sel,
             on_toggle_tpl_fn=self._on_toggle_extra_capcut_tpl,
-            on_clone_as_mau_fn=self._on_clone_project_as_mau,
             detected_root=self._scanned_root_cache,
+            explicit_mode=bool(self.cfg.get("capcut_tpl_explicit_v2")),
         )
 
     def _on_single_channel_toggled(self, cid: str, cname: str, checked: bool):
@@ -1194,25 +1262,31 @@ class SniperMainWindow(QMainWindow):
 
         t["_last_used_tpl"] = tpl_name
         title = t.get("title") or ""
-        force_restart = False
+        has_editor, editor_title = has_active_capcut_editor_window()
 
-        if not auto_mode and has_visible_capcut_window():
+        if not auto_mode and has_editor:
             ans = QMessageBox.question(
                 self,
-                "CapCut đang mở sẵn",
-                "Cửa sổ CapCut đang mở trên màn hình.\n"
-                "Bạn có muốn tự khởi động lại nhanh CapCut (~1 giây) để hiện ngay Project mới ở vị trí đầu tiên không?\n\n"
-                "• Chọn Yes: Tự mở lại CapCut & hiện ngay Project mới ở #1.\n"
-                "• Chọn No: Vẫn tạo Project mới trong thư mục nháp mà không đóng cửa sổ đang mở.",
+                "CapCut đang mở dự án khác",
+                f"CapCut đang mở sẵn dự án '{editor_title}'.\n"
+                "Bạn có muốn chuyển sang mở thẳng vào Timeline của Project mới ngay bây giờ không?\n\n"
+                "• Chọn Yes: Tự làm mới CapCut & nhảy thẳng vào trong Project mới.\n"
+                "• Chọn No: Vẫn tạo sẵn Project mới trong kho nháp mà không đóng dự án đang sửa.",
             )
-            force_restart = ans == QMessageBox.StandardButton.Yes
+            should_launch = ans == QMessageBox.StandardButton.Yes
+            force_restart = should_launch
+        else:
+            should_launch = (not auto_mode) or (not has_editor)
+            force_restart = should_launch
+
+        t["_auto_enter_capcut"] = bool(should_launch)
 
         self.downloader.apply_capcut_async(
             vid=vid,
             video_path=file_path,
             video_title=title,
             template_name=tpl_name,
-            auto_launch_capcut=(not auto_mode) or (not has_visible_capcut_window()),
+            auto_launch_capcut=should_launch,
             force_restart_if_open=force_restart,
         )
 
@@ -1220,6 +1294,12 @@ class SniperMainWindow(QMainWindow):
         if ok:
             self._append_log(f"✂️ [CAPCUT 1-CLICK] {msg}")
             t = self._task_cache.get(vid)
+            if t and t.pop("_auto_enter_capcut", False):
+                threading.Thread(
+                    target=auto_open_latest_capcut_project,
+                    daemon=True,
+                    name="CapCutAutoEnter",
+                ).start()
             used_tpl = (t.get("_last_used_tpl") if t else None) or BLANK_TEMPLATE_KEY
             if t:
                 base_st = re.sub(r"\s*•\s*✂️ Đã tạo:.*$", "", t.get("status_text") or "")
