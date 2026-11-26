@@ -1305,6 +1305,24 @@ class SniperMainWindow(QMainWindow):
                         st_txt = f"✅ {r['size_mb']} MB • Tổng thời gian: {tot:.2f}s ({r['speed_mbs']} MB/s)"
                 elif st == "cancelled":
                     st_txt = "⏹ Đã hủy tải"
+                elif st in ("downloading", "preparing", "waiting_hd", "muxing", "queued", "merging"):
+                    st = "cancelled"
+                    st_txt = "⏹ Đã dừng giữa chừng (lần mở trước)"
+                    try:
+                        self.history.upsert_task(
+                            self.vps.username,
+                            {
+                                "video_id": vid,
+                                "url": r.get("video_url") or f"https://www.youtube.com/watch?v={vid}",
+                                "channel": r["channel_name"],
+                                "note": r["note"],
+                                "title": r["video_title"],
+                                "resolution_badge": res_b,
+                                "status": "cancelled",
+                            },
+                        )
+                    except Exception:
+                        pass
                 else:
                     st_txt = f"❌ {r['error_msg'] or st}"
 

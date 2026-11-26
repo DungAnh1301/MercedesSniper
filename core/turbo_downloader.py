@@ -701,11 +701,31 @@ class TurboDownloaderEngine:
     # 🎯 QUẢN LÝ HÀNG ĐỢI, HỦY (CANCEL) & TẢI LẠI (RETRY)
     # ==========================================================
     def cancel_task(self, video_id: str) -> bool:
+        stale_task = None
         with self._lock:
             ev = self._cancel_events.get(video_id)
             if ev:
                 ev.set()
                 return True
+            t = self._active_tasks.get(video_id)
+            if t and t.get("state") in ("preparing", "waiting_hd", "downloading", "muxing", "queued", "merging"):
+                t["state"] = "cancelled"
+                t["live_speed_mbs"] = 0.0
+                t["status_text"] = "⏹ Đã hủy tải"
+                stale_task = dict(t)
+        if stale_task is not None:
+            self._emit_update(stale_task)
+            return True
+        # Nếu thẻ bị kẹt từ phiên trước không còn trong _active_tasks -> ép nhả về cancelled cho UI xóa được
+        self._emit_update(
+            {
+                "video_id": video_id,
+                "state": "cancelled",
+                "live_speed_mbs": 0.0,
+                "percent": 0.0,
+                "status_text": "⏹ Đã hủy tải",
+            }
+        )
         return False
 
     def enqueue(
