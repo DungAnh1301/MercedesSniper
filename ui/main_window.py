@@ -10,6 +10,7 @@ import re
 import shutil
 import sys
 import threading
+import time
 import webbrowser
 
 from PyQt6.QtCore import QObject, Qt, QTimer, pyqtSignal
@@ -1102,6 +1103,24 @@ class SniperMainWindow(QMainWindow):
 
         return True, "OK"
 
+    @staticmethod
+    def _resolve_video_delay_sec(v: dict) -> int | None:
+        srv_delay = v.get("delay_sec")
+        pub_ts = v.get("published_ts")
+        if pub_ts is not None:
+            try:
+                pc_delay = max(0, int(time.time() - float(pub_ts)))
+                if srv_delay is None or abs(pc_delay - int(srv_delay)) <= 120:
+                    return pc_delay
+            except Exception:
+                pass
+        if srv_delay is not None:
+            try:
+                return max(0, int(srv_delay))
+            except Exception:
+                pass
+        return None
+
     def _ui_on_new_video(self, v: dict):
         cname = v.get("channel") or "YouTube"
         title = v.get("title") or "Video Mới"
@@ -1109,10 +1128,15 @@ class SniperMainWindow(QMainWindow):
         v_type = v.get("v_type") or "VIDEO"
         url = v.get("url") or ""
         vid = extract_video_id(url)
+        delay_s = self._resolve_video_delay_sec(v)
+        delay_txt = f"delay : {delay_s} (s)" if delay_s is not None else ""
 
         disabled = self._get_disabled_set()
         if (v.get("channel_id") in disabled) or (cname in disabled):
             return
+
+        if delay_txt:
+            self._append_log(f"⚡ [{cname}] {title} • {delay_txt}")
 
         should_dl, reason = self._check_auto_rules(v)
 
@@ -1121,6 +1145,8 @@ class SniperMainWindow(QMainWindow):
                 play_alert_beep(is_complete=False)
             if self.cfg.get("toast_popup", True):
                 ch_disp = f"{cname} • {note}" if note else cname
+                if delay_txt:
+                    ch_disp = f"{ch_disp} • {delay_txt}"
                 pop = DesktopToastPopup(
                     f"⚡ VIDEO MỚI [{v_type}] • ĐANG KÉO MAX SPEED",
                     ch_disp,
@@ -1149,6 +1175,11 @@ class SniperMainWindow(QMainWindow):
             # Đưa nhẹ vào mục "Bỏ qua / Lỗi" để người dùng có thể bấm "⬇ Tải Ngay" bù nếu muốn!
             if vid:
                 self.downloader.request_thumbnail(vid)
+                st_parts = [f"⏭ Bỏ qua tự tải ({reason})"]
+                if delay_txt:
+                    st_parts.append(delay_txt)
+                if v.get("v_dur"):
+                    st_parts.append(str(v.get("v_dur")))
                 skipped_task = {
                     "video_id": vid,
                     "url": url,
@@ -1159,7 +1190,7 @@ class SniperMainWindow(QMainWindow):
                     "resolution_badge": v_type,
                     "percent": 0.0,
                     "state": "skipped",
-                    "status_text": f"⏭ Bỏ qua tự tải ({reason}) • {v.get('v_dur', '')}".strip(" •"),
+                    "status_text": " • ".join(st_parts),
                     "file_path": "",
                 }
                 self._ui_upsert_card(skipped_task)
@@ -1219,7 +1250,9 @@ class SniperMainWindow(QMainWindow):
                 ago = v.get("time_ago") or ""
                 time_part = f"{posted} ({ago})" if (posted and ago) else (posted or ago)
                 dur_part = f"{v_type} {v_dur}".strip()
-                st_txt = f"🌐 Trên Server • {time_part} • {dur_part}".strip(" •")
+                d_sec = v.get("delay_sec")
+                delay_part = f"⚡ delay : {int(d_sec)} (s)" if d_sec is not None else ""
+                st_txt = " • ".join(p for p in ("🌐 Trên Server", delay_part, time_part, dur_part) if p)
 
                 self._ui_upsert_card(
                     {
