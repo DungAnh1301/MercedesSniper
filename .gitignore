@@ -3,6 +3,8 @@ __pycache__/
 *.py[cod]
 *$py.class
 .yt_cache/
+.yt_cookie_runtime/
+qjs.exe
 
 # PyInstaller build outputs & temporary artifacts
 build/

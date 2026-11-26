@@ -448,7 +448,10 @@ class SniperMainWindow(QMainWindow):
 
     def _choose_cookie_file(self):
         fp, _ = QFileDialog.getOpenFileName(
-            self, "Chọn file cookies.txt", "", "Text Files (*.txt);;All Files (*)"
+            self,
+            "Chọn file Cookies YouTube (cookies.txt hoặc JSON)",
+            "",
+            "Cookie Files (*.txt *.json);;All Files (*)",
         )
         if fp:
             self.page_settings.inp_cookie_file.setText(fp)
@@ -456,6 +459,7 @@ class SniperMainWindow(QMainWindow):
                 self.page_settings.cmb_cookie.findData("file")
             )
             self._save_all_prefs()
+            self.page_settings.run_cookie_test()
 
     def _open_save_root(self):
         d = self.cfg.get("save_dir") or os.path.join(os.path.expanduser("~"), "Downloads", "Soitube_1080p")
@@ -1693,19 +1697,17 @@ class SniperMainWindow(QMainWindow):
         if os.name != "nt":
             return
         try:
-            import ctypes
-
             app = QApplication.instance()
             refs = getattr(app, "_single_instance_refs", None)
-            if refs:
-                k32 = ctypes.windll.kernel32
-                mx_h, ev_h = refs
-                if mx_h:
-                    k32.ReleaseMutex(mx_h)
-                    k32.CloseHandle(mx_h)
-                if ev_h:
-                    k32.CloseHandle(ev_h)
-                app._single_instance_refs = (None, None)
+            if refs and len(refs) == 3:
+                k32, mx_h, ev_h = refs
+                if k32:
+                    if mx_h:
+                        k32.ReleaseMutex(mx_h)
+                        k32.CloseHandle(mx_h)
+                    if ev_h:
+                        k32.CloseHandle(ev_h)
+                app._single_instance_refs = (None, None, None)
         except Exception:
             pass
 

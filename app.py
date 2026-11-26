@@ -183,12 +183,13 @@ def main():
     if "--self-test" in sys.argv:
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         _app = QApplication(sys.argv)
+        from core.cookie_doctor import prepare_working_cookie_file  # noqa: F401
         from core.turbo_downloader import detect_system_capabilities
         from core.worker_bridge import IsolatedDownloaderProxy
         import yt_dlp  # noqa: F401
 
         caps = detect_system_capabilities()
-        if not caps.get("ffmpeg_ok"):
+        if not caps.get("ffmpeg_ok") or not caps.get("node_ok"):
             sys.exit(2)
         proxy = IsolatedDownloaderProxy(load_config())
         proxy.shutdown()

@@ -76,8 +76,9 @@ def find_ffmpeg_binary() -> str:
 
 
 def build_and_verify_exe(dist_dir: Path) -> Path:
-    print("[3/6] Đang đóng gói PyInstaller One-File (.exe) kèm FFmpeg...")
+    print("[3/6] Đang đóng gói PyInstaller One-File (.exe) kèm FFmpeg + QuickJS...")
     ffmpeg_bin = find_ffmpeg_binary()
+    qjs_bin = PROJECT_DIR / "qjs.exe"
     build_dir = PROJECT_DIR / "build_rel_tmp"
     shutil.rmtree(dist_dir, ignore_errors=True)
     shutil.rmtree(build_dir, ignore_errors=True)
@@ -96,26 +97,34 @@ def build_and_verify_exe(dist_dir: Path) -> Path:
         "MercedesSniper_MaxSpeed",
         "--add-binary",
         f"{ffmpeg_bin};.",
-        "--collect-all",
-        "curl_cffi",
-        "--hidden-import",
-        "core.worker_bridge",
-        "--hidden-import",
-        "core.turbo_downloader",
-        "--hidden-import",
-        "core.capcut_injector",
-        "--hidden-import",
-        "core.updater",
-        "--hidden-import",
-        "yt_dlp",
-        "--distpath",
-        str(dist_dir),
-        "--workpath",
-        str(build_dir),
-        "--specpath",
-        str(build_dir),
-        "app.py",
     ]
+    if qjs_bin.exists():
+        pyi_cmd.extend(["--add-binary", f"{qjs_bin.resolve()};."])
+    pyi_cmd.extend(
+        [
+            "--collect-all",
+            "curl_cffi",
+            "--hidden-import",
+            "core.worker_bridge",
+            "--hidden-import",
+            "core.turbo_downloader",
+            "--hidden-import",
+            "core.cookie_doctor",
+            "--hidden-import",
+            "core.capcut_injector",
+            "--hidden-import",
+            "core.updater",
+            "--hidden-import",
+            "yt_dlp",
+            "--distpath",
+            str(dist_dir),
+            "--workpath",
+            str(build_dir),
+            "--specpath",
+            str(build_dir),
+            "app.py",
+        ]
+    )
     res = run_cmd(pyi_cmd)
     shutil.rmtree(build_dir, ignore_errors=True)
     exe_path = dist_dir / EXE_NAME

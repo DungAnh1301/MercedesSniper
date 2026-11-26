@@ -819,9 +819,13 @@ class SettingsPage(QWidget):
     """Màn hình 4: Cài đặt Thư mục, Chất lượng, Động cơ Max Speed & Cookies."""
 
     _sig_hw_ready = pyqtSignal(str)
+    _sig_cookie_test_done = pyqtSignal(dict)
 
     def __init__(self, cfg: dict, on_prefs_changed, on_pick_dir, on_pick_cookie, parent=None):
         super().__init__(parent)
+        self._cfg_ref = cfg
+        self._testing_cookie = False
+        self._sig_cookie_test_done.connect(self._on_cookie_test_finished)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -964,16 +968,38 @@ class SettingsPage(QWidget):
         ck_wrap.setObjectName("TransparentBox")
         ck_lay = QHBoxLayout(ck_wrap)
         ck_lay.setContentsMargins(0, 0, 0, 0)
-        ck_lay.setSpacing(8)
+        ck_lay.setSpacing(6)
         self.inp_cookie_file = QLineEdit(cfg.get("cookie_file", ""))
-        self.inp_cookie_file.setPlaceholderText("Đường dẫn cookies.txt...")
-        self.inp_cookie_file.setFixedWidth(250)
+        self.inp_cookie_file.setPlaceholderText("Đường dẫn cookies.txt (hoặc JSON)...")
+        self.inp_cookie_file.setFixedWidth(220)
         self.inp_cookie_file.textChanged.connect(on_prefs_changed)
-        btn_ck = QPushButton("Chọn file")
+        btn_ck = QPushButton("📄 Chọn file")
+        btn_ck.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_ck.clicked.connect(on_pick_cookie)
+
+        self.btn_test_cookie = QPushButton("🧪 Kiểm tra Cookie")
+        self.btn_test_cookie.setObjectName("DragActionBtn")
+        self.btn_test_cookie.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_test_cookie.setToolTip("Kiểm tra thực chiến xem Cookie còn sống, đủ khóa LOGIN_INFO và tải được YouTube 1080p không")
+        self.btn_test_cookie.clicked.connect(self.run_cookie_test)
+
         ck_lay.addWidget(self.inp_cookie_file)
         ck_lay.addWidget(btn_ck)
-        c2.add_setting_row("File cookies.txt", "Định dạng Netscape cookies.txt.", ck_wrap)
+        ck_lay.addWidget(self.btn_test_cookie)
+        c2.add_setting_row("File cookies.txt / Kiểm định", "Hỗ trợ chuẩn Netscape .txt và JSON (J2Team/Cookie-Editor). Tự bảo vệ chống ghi đè hỏng file gốc.", ck_wrap)
+
+        self.cookie_status_box = QFrame()
+        self.cookie_status_box.setVisible(False)
+        cs_lay = QVBoxLayout(self.cookie_status_box)
+        cs_lay.setContentsMargins(10, 8, 10, 8)
+        cs_lay.setSpacing(3)
+        self.lbl_ck_sum = QLabel("")
+        self.lbl_ck_sum.setWordWrap(True)
+        self.lbl_ck_det = QLabel("")
+        self.lbl_ck_det.setWordWrap(True)
+        cs_lay.addWidget(self.lbl_ck_sum)
+        cs_lay.addWidget(self.lbl_ck_det)
+        c2.add_full_widget(self.cookie_status_box)
 
         lay.addWidget(c2)
 
@@ -1025,3 +1051,52 @@ class SettingsPage(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(scroll)
+
+    def run_cookie_test(self):
+        if self._testing_cookie:
+            return
+        self._testing_cookie = True
+        self.btn_test_cookie.setEnabled(False)
+        self.btn_test_cookie.setText("⏳ Đang kiểm tra...")
+        self.cookie_status_box.setVisible(True)
+        self.cookie_status_box.setStyleSheet(
+            "QFrame { background-color: #17253B; border: 1px solid #38BDF8; border-radius: 7px; }"
+        )
+        self.lbl_ck_sum.setStyleSheet("color: #7DD3FC; font-size: 12px; font-weight: 800; background: transparent; border: none;")
+        self.lbl_ck_det.setStyleSheet("color: #CBD5E1; font-size: 11.5px; background: transparent; border: none;")
+        self.lbl_ck_sum.setText("⏳ Đang kiểm tra khóa xác thực YouTube & kết nối bóc luồng 1080p thực tế...")
+        self.lbl_ck_det.setText("Vui lòng chờ khoảng 2 - 4 giây...")
+
+        snap_cfg = {
+            "cookie_mode": str(self.cmb_cookie.currentData() or "none"),
+            "cookie_file": self.inp_cookie_file.text().strip(),
+        }
+
+        def _worker():
+            from core.cookie_doctor import verify_youtube_cookies
+            res = verify_youtube_cookies(snap_cfg)
+            self._sig_cookie_test_done.emit(res)
+
+        threading.Thread(target=_worker, daemon=True, name="CookieDoctorTest").start()
+
+    def _on_cookie_test_finished(self, res: dict):
+        self._testing_cookie = False
+        self.btn_test_cookie.setEnabled(True)
+        self.btn_test_cookie.setText("🧪 Kiểm tra Cookie")
+        ok = bool(res.get("ok"))
+        self.cookie_status_box.setVisible(True)
+        if ok:
+            self.cookie_status_box.setStyleSheet(
+                "QFrame { background-color: #0D281E; border: 1.5px solid #10B981; border-radius: 7px; }"
+            )
+            self.lbl_ck_sum.setStyleSheet("color: #4ADE80; font-size: 12.5px; font-weight: 800; background: transparent; border: none;")
+            self.lbl_ck_det.setStyleSheet("color: #E2E8F0; font-size: 11.5px; background: transparent; border: none;")
+        else:
+            self.cookie_status_box.setStyleSheet(
+                "QFrame { background-color: #31151B; border: 1.5px solid #F43F5E; border-radius: 7px; }"
+            )
+            self.lbl_ck_sum.setStyleSheet("color: #FDA4AF; font-size: 12.5px; font-weight: 800; background: transparent; border: none;")
+            self.lbl_ck_det.setStyleSheet("color: #F1F5F9; font-size: 11.5px; background: transparent; border: none;")
+
+        self.lbl_ck_sum.setText(str(res.get("summary") or ""))
+        self.lbl_ck_det.setText(str(res.get("detail") or ""))
