@@ -51,6 +51,7 @@ class LiveQueuePage(QWidget):
         on_clear_finished,
         on_open_templates_tab=None,
         on_refresh_server_feed=None,
+        on_clear_all_old=None,
         parent=None,
     ):
         super().__init__(parent)
@@ -160,8 +161,17 @@ class LiveQueuePage(QWidget):
         btn_clean.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_clean.clicked.connect(on_clear_finished)
 
+        self.btn_clear_all = QPushButton("🗑 Xóa video cũ")
+        self.btn_clear_all.setObjectName("GhostDangerBtn")
+        self.btn_clear_all.setFixedHeight(25)
+        self.btn_clear_all.setToolTip("Xóa sạch toàn bộ danh sách video cũ trên Tool (tùy chọn giữ hoặc xóa cả file .mp4)")
+        self.btn_clear_all.setCursor(Qt.CursorShape.PointingHandCursor)
+        if on_clear_all_old:
+            self.btn_clear_all.clicked.connect(on_clear_all_old)
+
         sub_bar.addWidget(btn_folder)
         sub_bar.addWidget(btn_clean)
+        sub_bar.addWidget(self.btn_clear_all)
         lay.addLayout(sub_bar)
 
         # 3. DANH SÁCH THẺ VIDEO MẢNH GỌN (62px/thanh, cách nhau 5px)

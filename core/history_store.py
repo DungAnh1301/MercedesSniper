@@ -235,3 +235,59 @@ class HistoryStore:
             )
             conn.commit()
             return (cur1.rowcount or 0) + (cur2.rowcount or 0)
+
+    def get_dismissed_ids(self, username: str) -> set[str]:
+        u_key = (username or "local").lower()
+        with self._lock, self._connect() as conn:
+            cur = conn.execute(
+                "SELECT video_id FROM downloads WHERE username=? AND status='dismissed'",
+                (u_key,),
+            )
+            return {str(r[0]) for r in cur.fetchall() if r[0]}
+
+    def dismiss_all_old_videos(self, username: str, extra_items: list[dict] | None = None) -> int:
+        """Đánh dấu ẩn toàn bộ video cũ (đã tải xong / trên Server / lỗi / bỏ qua) để không tự hiện lại."""
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        u_key = (username or "local").lower()
+        with self._lock, self._connect() as conn:
+            cur = conn.execute(
+                """
+                UPDATE downloads
+                SET status='dismissed'
+                WHERE username=? AND status NOT IN ('downloading', 'waiting_hd', 'preparing', 'queued', 'merging')
+                """,
+                (u_key,),
+            )
+            cnt = cur.rowcount or 0
+            if extra_items:
+                rows = []
+                for it in extra_items:
+                    vid = str(it.get("video_id") or "").strip()
+                    if not vid:
+                        continue
+                    rows.append(
+                        (
+                            u_key,
+                            vid,
+                            str(it.get("url") or ""),
+                            str(it.get("channel") or ""),
+                            str(it.get("note") or ""),
+                            str(it.get("title") or ""),
+                            "dismissed",
+                            now_str,
+                        )
+                    )
+                if rows:
+                    conn.executemany(
+                        """
+                        INSERT INTO downloads (
+                            username, video_id, video_url, channel_name, note,
+                            video_title, status, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(username, video_id) DO UPDATE SET status='dismissed'
+                        """,
+                        rows,
+                    )
+                    cnt += len(rows)
+            conn.commit()
+            return cnt

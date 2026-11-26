@@ -276,6 +276,7 @@ class SniperMainWindow(QMainWindow):
             on_clear_finished=self._clear_non_completed_cards,
             on_open_templates_tab=lambda: self._switch_to_tab(2),
             on_refresh_server_feed=self._handle_refresh_server_feed,
+            on_clear_all_old=self._clear_all_old_videos,
         )
         self.page_channels = ChannelsPage(
             on_add_channel=self._handle_add_channel,
@@ -1098,6 +1099,7 @@ class SniperMainWindow(QMainWindow):
             return
 
         disabled = self._get_disabled_set()
+        dismissed_ids = self.history.get_dismissed_ids(self.vps.username)
         note_flt = (self.cfg.get("note_filter") or "").strip().lower()
         new_thumb_vids: list[str] = []
 
@@ -1107,7 +1109,7 @@ class SniperMainWindow(QMainWindow):
             for v in videos[-30:]:
                 url = v.get("url") or ""
                 vid = v.get("video_id") or extract_video_id(url)
-                if not vid:
+                if not vid or vid in dismissed_ids:
                     continue
 
                 cid = v.get("channel_id") or ""
@@ -1349,6 +1351,92 @@ class SniperMainWindow(QMainWindow):
                 self.page_queue.cards_lay.removeWidget(card)
                 card.deleteLater()
         self.page_queue.apply_card_filter()
+
+    def _clear_all_old_videos(self):
+        active_states = ("downloading", "queued", "waiting_hd", "merging", "preparing")
+        old_vids = [
+            vid
+            for vid, card in self.page_queue.cards_map.items()
+            if card.current_state not in active_states
+        ]
+        if not old_vids:
+            QMessageBox.information(self, "Xóa video cũ", "Danh sách hiện đã sạch sẽ, không có video cũ nào cần xóa!")
+            return
+
+        mp4_files = []
+        for vid in old_vids:
+            fp = (self._task_cache.get(vid) or {}).get("file_path") or ""
+            if fp and os.path.isfile(fp):
+                mp4_files.append(fp)
+
+        delete_disk_files = False
+        if mp4_files:
+            box = QMessageBox(self)
+            box.setWindowTitle("Xóa toàn bộ video cũ")
+            box.setIcon(QMessageBox.Icon.Question)
+            box.setText(
+                f"Bạn muốn xóa toàn bộ {len(old_vids)} video cũ đang hiện trên Tool như thế nào?\n\n"
+                f"• [🧹 Chỉ dọn danh sách]: Xóa sạch thẻ cũ trên Tool (giữ nguyên {len(mp4_files)} file .mp4 trong ổ cứng).\n"
+                f"• [🗑 Xóa cả file .mp4]: Dọn sạch danh sách VÀ xóa luôn {len(mp4_files)} file .mp4 cũ khỏi ổ cứng."
+            )
+            btn_list_only = box.addButton("🧹 Chỉ dọn danh sách", QMessageBox.ButtonRole.AcceptRole)
+            btn_with_mp4 = box.addButton(f"🗑 Xóa cả file .mp4 ({len(mp4_files)})", QMessageBox.ButtonRole.DestructiveRole)
+            btn_cancel = box.addButton("Hủy", QMessageBox.ButtonRole.RejectRole)
+            box.setDefaultButton(btn_list_only)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked is btn_cancel or clicked is None:
+                return
+            delete_disk_files = clicked is btn_with_mp4
+        else:
+            ans = QMessageBox.question(
+                self,
+                "Xóa toàn bộ video cũ",
+                f"Bạn có chắc muốn xóa sạch toàn bộ {len(old_vids)} video cũ khỏi danh sách Tool không?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if ans != QMessageBox.StandardButton.Yes:
+                return
+
+        extra_items = []
+        self.page_queue.cards_container.setUpdatesEnabled(False)
+        try:
+            for vid in old_vids:
+                t = self._task_cache.pop(vid, None) or {}
+                extra_items.append(
+                    {
+                        "video_id": vid,
+                        "url": t.get("url") or "",
+                        "channel": t.get("channel") or "",
+                        "note": t.get("note") or "",
+                        "title": t.get("title") or "",
+                    }
+                )
+                card = self.page_queue.cards_map.pop(vid, None)
+                if card:
+                    self.page_queue.cards_lay.removeWidget(card)
+                    card.deleteLater()
+            self.page_queue.apply_card_filter()
+        finally:
+            self.page_queue.cards_container.setUpdatesEnabled(True)
+
+        self.history.dismiss_all_old_videos(self.vps.username, extra_items=extra_items)
+
+        deleted_files_cnt = 0
+        if delete_disk_files:
+            for fp in mp4_files:
+                try:
+                    os.remove(fp)
+                    deleted_files_cnt += 1
+                except OSError:
+                    pass
+            self._refresh_disk_space()
+
+        if delete_disk_files:
+            self._append_log(f"🗑 Đã xóa sạch {len(old_vids)} video cũ trên Tool & xóa {deleted_files_cnt} file .mp4 trên ổ cứng!")
+        else:
+            self._append_log(f"🧹 Đã dọn sạch {len(old_vids)} video cũ khỏi danh sách Tool!")
 
     def _ui_on_thumb_ready(self, vid: str, img_bytes: bytes):
         card = self.page_queue.cards_map.get(vid)

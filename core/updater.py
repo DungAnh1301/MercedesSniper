@@ -22,7 +22,7 @@ import requests
 
 from core.history_store import BASE_DIR
 
-APP_VERSION = "1.0.5"
+APP_VERSION = "1.0.6"
 GITHUB_OWNER = "DungAnh1301"
 GITHUB_REPO = "MercedesSniper"
 EXE_ASSET_NAME = "MercedesSniper_MaxSpeed.exe"
