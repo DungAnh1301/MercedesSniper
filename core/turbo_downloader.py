@@ -74,16 +74,16 @@ def find_ffmpeg_dir() -> str | None:
 
 
 def find_js_runtime() -> tuple[str | None, str | None]:
-    """Dò tự động `deno.exe` hoặc `node.exe` (ưu tiên bản đóng gói chìm / đặt cạnh .exe / hệ thống)."""
+    """Dò tự động `qjs.exe` (QuickJS nhúng chìm cho mọi máy cũ), `deno.exe` hoặc `node.exe`."""
     meipass = getattr(sys, "_MEIPASS", None)
     search_roots = [r for r in (meipass, EXE_DIR, BASE_DIR) if r]
-    for rt_name, exe_name in (("deno", "deno.exe"), ("node", "node.exe")):
+    for rt_name, exe_name in (("quickjs", "qjs.exe"), ("deno", "deno.exe"), ("node", "node.exe")):
         for root in search_roots:
             for rel in (exe_name, os.path.join("bin", exe_name)):
                 p = os.path.join(root, rel)
                 if os.path.isfile(p):
                     return rt_name, p
-        in_path = shutil.which(rt_name)
+        in_path = shutil.which(exe_name.replace(".exe", ""))
         if in_path:
             return rt_name, in_path
     for c in (r"C:\Program Files\nodejs\node.exe", r"C:\Program Files (x86)\nodejs\node.exe"):
@@ -449,11 +449,12 @@ class TurboDownloaderEngine:
         if self.caps["ffmpeg_dir"]:
             opts["ffmpeg_location"] = self.caps["ffmpeg_dir"]
 
-        # Chỉ gắn JS solver (deno/node) khi dùng client mặc định/web (các client Apple/Safari không cần giải n-sig JS)
+        # Gắn JS solver nhúng chìm (qjs/deno/node + ejs:github) khi dùng client mặc định/web kèm Cookie trên mọi máy cũ!
         if self.caps["node_ok"] and not player_clients:
             js_kind = self.caps.get("js_runtime_kind") or "node"
             js_exe = self.caps.get("node_exe")
             opts["js_runtimes"] = {js_kind: {"path": js_exe} if js_exe else {}}
+            opts["remote_components"] = ["ejs:github"]
 
         if player_clients:
             opts["extractor_args"] = {"youtube": {"player_client": list(player_clients)}}
@@ -480,7 +481,9 @@ class TurboDownloaderEngine:
             if c_mode == "file":
                 c_file = (self.cfg.get("cookie_file") or "").strip()
                 if c_file and os.path.isfile(c_file):
-                    opts["cookiefile"] = c_file
+                    from core.cookie_doctor import prepare_working_cookie_file
+                    work_ck, _ = prepare_working_cookie_file(c_file)
+                    opts["cookiefile"] = work_ck if work_ck else c_file
             elif c_mode in ("chrome", "edge", "brave", "firefox"):
                 opts["cookiesfrombrowser"] = (c_mode,)
         return opts
@@ -1223,7 +1226,7 @@ class TurboDownloaderEngine:
                     on_delta_bytes(delta)
 
         with self._lock:
-            need_ck = bool(base_info.get("id") in self._cookie_required_vids)
+            need_ck = bool(base_info.get("id") in self._cookie_required_vids) or self._has_cookie_configured()
         opts = self._build_ydl_extract_opts(use_cookies=need_ck)
         opts.update(
             {

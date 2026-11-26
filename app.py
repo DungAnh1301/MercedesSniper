@@ -94,27 +94,85 @@ def save_config(cfg: dict):
         pass
 
 
-def _acquire_single_instance_or_wakeup() -> tuple[object, object]:
-    """Chặn mở chồng nhiều bản Tool ngầm dưới khay hệ thống (bấm đúp icon Desktop sẽ gọi cửa sổ cũ hiện lên ngay!)."""
+def _acquire_single_instance_or_wakeup() -> tuple[object, object, object]:
+    """
+    Chặn mở chồng nhiều bản Tool ngầm bằng cơ chế chiếm quyền sở hữu Mutex thực sự (`WaitForSingleObject`):
+    - Đánh dấu `HANDLE_FLAG_INHERIT = 0` để CapCut / FFmpeg không bao giờ kế thừa nhầm Handle.
+    - Nếu bản trước bị tắt ngang (`Stop-Process` / crash), Windows trả `WAIT_ABANDONED (0x80)` -> tự tiếp quản mở bình thường 100%, không bao giờ bị kẹt Mutex ma!
+    - Chỉ khi có 1 tiến trình GUI đang sống thực sự giữ Mutex (`WAIT_TIMEOUT = 0x102`) mới kích hoạt Wakeup gọi cửa sổ cũ lên.
+    """
     if os.name != "nt":
-        return None, None
+        return None, None, None
     try:
         import ctypes
+        from ctypes import wintypes
 
-        k32 = ctypes.windll.kernel32
-        ERROR_ALREADY_EXISTS = 183
-        ev_handle = k32.CreateEventW(None, False, False, "Local\\MercedesSniper_MaxSpeed_Wakeup_v5")
-        mx_handle = k32.CreateMutexW(None, False, "Local\\MercedesSniper_MaxSpeed_Mutex_v5")
-        if k32.GetLastError() == ERROR_ALREADY_EXISTS:
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+        k32.CreateEventW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.BOOL, wintypes.LPCWSTR]
+        k32.CreateEventW.restype = wintypes.HANDLE
+
+        k32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
+        k32.CreateMutexW.restype = wintypes.HANDLE
+
+        k32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        k32.WaitForSingleObject.restype = wintypes.DWORD
+
+        k32.SetEvent.argtypes = [wintypes.HANDLE]
+        k32.SetEvent.restype = wintypes.BOOL
+
+        k32.ReleaseMutex.argtypes = [wintypes.HANDLE]
+        k32.ReleaseMutex.restype = wintypes.BOOL
+
+        k32.CloseHandle.argtypes = [wintypes.HANDLE]
+        k32.CloseHandle.restype = wintypes.BOOL
+
+        k32.SetHandleInformation.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD]
+        k32.SetHandleInformation.restype = wintypes.BOOL
+
+        HANDLE_FLAG_INHERIT = 0x00000001
+        WAIT_OBJECT_0 = 0x00000000
+        WAIT_ABANDONED = 0x00000080
+        WAIT_TIMEOUT = 0x00000102
+
+        ev_handle = k32.CreateEventW(None, False, False, "Local\\MercedesSniper_LiveOwner_Wakeup_v6")
+        if ev_handle:
+            k32.SetHandleInformation(ev_handle, HANDLE_FLAG_INHERIT, 0)
+
+        mx_handle = k32.CreateMutexW(None, False, "Local\\MercedesSniper_LiveOwner_Mutex_v6")
+        if not mx_handle:
+            return k32, None, ev_handle
+        k32.SetHandleInformation(mx_handle, HANDLE_FLAG_INHERIT, 0)
+
+        wait_res = k32.WaitForSingleObject(mx_handle, 0)
+        if wait_res in (WAIT_OBJECT_0, WAIT_ABANDONED):
+            return k32, mx_handle, ev_handle
+
+        if wait_res == WAIT_TIMEOUT:
             if ev_handle:
                 k32.SetEvent(ev_handle)
                 k32.CloseHandle(ev_handle)
-            if mx_handle:
-                k32.CloseHandle(mx_handle)
+            k32.CloseHandle(mx_handle)
             sys.exit(0)
-        return mx_handle, ev_handle
+
+        return k32, mx_handle, ev_handle
+    except SystemExit:
+        raise
     except Exception:
-        return None, None
+        return None, None, None
+
+
+def _release_single_instance(k32, mx_handle, ev_handle):
+    if not k32:
+        return
+    try:
+        if mx_handle:
+            k32.ReleaseMutex(mx_handle)
+            k32.CloseHandle(mx_handle)
+        if ev_handle:
+            k32.CloseHandle(ev_handle)
+    except Exception:
+        pass
 
 
 def main():
@@ -136,11 +194,12 @@ def main():
         proxy.shutdown()
         sys.exit(0)
 
-    mx_handle, ev_handle = _acquire_single_instance_or_wakeup()
+    k32_dll, mx_handle, ev_handle = _acquire_single_instance_or_wakeup()
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
-    app._single_instance_refs = (mx_handle, ev_handle)
+    app._single_instance_refs = (k32_dll, mx_handle, ev_handle)
+    app.aboutToQuit.connect(lambda: _release_single_instance(k32_dll, mx_handle, ev_handle))
 
     from core.vps_client import DEFAULT_SERVER_URL, SoitubeVPSClient
     from ui.login_dialog import LoginDialog
@@ -164,18 +223,17 @@ def main():
     if not logged_in:
         dlg = LoginDialog(vps, cfg, save_config)
         if dlg.exec() != QDialog.DialogCode.Accepted:
+            _release_single_instance(k32_dll, mx_handle, ev_handle)
             sys.exit(0)
 
     win = SniperMainWindow(vps, cfg, save_config)
     app._main_win_ref = win
-    if ev_handle and os.name == "nt":
-        import ctypes
+    if ev_handle and k32_dll and os.name == "nt":
         import threading
 
         def _watch_wakeup():
-            k32 = ctypes.windll.kernel32
             while True:
-                res = k32.WaitForSingleObject(ev_handle, 0xFFFFFFFF)
+                res = k32_dll.WaitForSingleObject(ev_handle, 0xFFFFFFFF)
                 if res == 0:
                     QTimer.singleShot(0, win._restore_from_tray)
                 else:
