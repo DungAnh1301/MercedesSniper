@@ -22,7 +22,7 @@ import requests
 
 from core.history_store import BASE_DIR
 
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 GITHUB_OWNER = "DungAnh1301"
 GITHUB_REPO = "MercedesSniper"
 EXE_ASSET_NAME = "MercedesSniper_MaxSpeed.exe"
@@ -286,21 +286,28 @@ $ErrorActionPreference = "SilentlyContinue"
 if (-not (Test-Path -LiteralPath $JobFile)) { exit 1 }
 $job = Get-Content -LiteralPath $JobFile -Raw -Encoding UTF8 | ConvertFrom-Json
 
+# Xóa toàn bộ biến môi trường tạm của PyInstaller bản cũ để bản .exe mới khởi động sạch 100%
+Remove-Item Env:\_MEIPASS* -ErrorAction SilentlyContinue
+Remove-Item Env:\PYI_* -ErrorAction SilentlyContinue
+Remove-Item Env:\QT_* -ErrorAction SilentlyContinue
+Remove-Item Env:\TCL_* -ErrorAction SilentlyContinue
+Remove-Item Env:\TK_* -ErrorAction SilentlyContinue
+
 # 1. Chờ tiến trình GUI chính thoát hẳn
 if ($job.pid -gt 0) {
     $p = Get-Process -Id $job.pid -ErrorAction SilentlyContinue
-    if ($p) { $p.WaitForExit(8000) }
+    if ($p) { $p.WaitForExit(10000) }
 }
-Start-Sleep -Milliseconds 600
+Start-Sleep -Milliseconds 800
 
-# 2. Chờ PyInstaller Bootloader dọn _MEI xong và nhả khóa file .exe đích (thử tối đa 25 lần = 10 giây)
+# 2. Chờ PyInstaller Bootloader dọn _MEI xong và nhả khóa file .exe đích (thử tối đa 35 lần = 14 giây)
 $swapped = $false
-for ($i = 0; $i -lt 25; $i++) {
+for ($i = 0; $i -lt 35; $i++) {
     if ($i -eq 12) {
         Get-Process -ErrorAction SilentlyContinue | Where-Object {
             $_.Path -and ($_.Path -ieq $job.target_exe)
         } | Stop-Process -Force -ErrorAction SilentlyContinue
-        Start-Sleep -Milliseconds 500
+        Start-Sleep -Milliseconds 600
     }
     try {
         if (Test-Path -LiteralPath $job.target_exe) {
@@ -321,30 +328,37 @@ if ($swapped) {
 
 # 3. Khởi chạy lại Mercedes Sniper bản mới!
 if (Test-Path -LiteralPath $job.target_exe) {
-    Start-Process -FilePath $job.target_exe -WorkingDirectory $job.working_dir
+    Start-Process -FilePath $job.target_exe -WorkingDirectory $job.working_dir -WindowStyle Normal
 }
 """
     # Ghi UTF-8 có BOM (`utf-8-sig`) để Windows PowerShell 5.1 đọc chuẩn 100% đường dẫn tiếng Việt
     with open(ps1_path, "w", encoding="utf-8-sig") as f:
         f.write(ps1_script)
 
-    creation_flags = (
-        getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
-        | getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
-    )
+    clean_env = {
+        k: v
+        for k, v in os.environ.items()
+        if not k.upper().startswith(("_MEI", "PYI_", "QT_", "TCL_", "TK_"))
+    }
+    # TUYỆT ĐỐI chỉ dùng CREATE_NO_WINDOW (0x08000000) và KHÔNG truyền `-WindowStyle Hidden` kèm `DETACHED_PROCESS`,
+    # vì PowerShell 5.1 sẽ thoát sớm (rc=0) nếu gọi `-WindowStyle Hidden` khi không có Console Handle!
+    creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
     subprocess.Popen(
         [
             "powershell.exe",
             "-NoProfile",
+            "-NonInteractive",
             "-ExecutionPolicy",
             "Bypass",
-            "-WindowStyle",
-            "Hidden",
             "-File",
             ps1_path,
             job_path,
         ],
         creationflags=creation_flags,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env=clean_env,
         close_fds=True,
     )
     return True, "Đang nâng cấp phiên bản mới và tự khởi động lại..."
