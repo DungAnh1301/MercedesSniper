@@ -682,24 +682,20 @@ class TurboDownloaderEngine:
     @staticmethod
     def _compute_hd_poll_delay(attempt: int, waited_sec: float) -> float:
         """
-        Giãn nhịp quét 1080p thông minh kèm Jitter tự nhiên (giảm ~75-80% request thừa so với quét 2.5s cố định):
-        - 3 nhịp đầu (~12s đầu): quét 3.5s - 5.5s để bắt tức thì các clip ngắn vừa lên HD.
-        - Dưới 90s: 8.0s - 9.5s.
-        - Từ 90s - 240s: 12.0s - 14.0s.
-        - Trên 240s (video dài đang render trên YouTube): 17.5s - 20.0s.
+        Nhịp quét 1080p nhanh & thông minh kèm Jitter tự nhiên:
+        - 3 nhịp đầu (~8s đầu): 2.5s - 3.2s để bắt tức thì clip ngắn vừa lên 1080p.
+        - Dưới 60s: 4.5s - 5.5s.
+        - Từ 60s - 150s: 7.0s - 8.5s.
+        - Trên 150s: 10.0s - 12.0s.
         """
-        jitter = random.uniform(0.0, 1.5)
-        if attempt <= 1:
-            return 3.5 + random.uniform(0.0, 0.6)
-        if attempt == 2:
-            return 4.5 + random.uniform(0.0, 0.8)
-        if attempt == 3:
-            return 5.8 + random.uniform(0.0, 1.0)
-        if waited_sec < 90:
-            return 8.0 + jitter
-        if waited_sec < 240:
-            return 12.0 + jitter
-        return 17.5 + random.uniform(0.0, 2.5)
+        jitter = random.uniform(0.0, 1.0)
+        if attempt <= 3:
+            return 2.5 + random.uniform(0.0, 0.7)
+        if waited_sec < 60:
+            return 4.5 + jitter
+        if waited_sec < 150:
+            return 7.0 + random.uniform(0.0, 1.5)
+        return 10.0 + random.uniform(0.0, 2.0)
 
     # ==========================================================
     # 🎯 QUẢN LÝ HÀNG ĐỢI, HỦY (CANCEL) & TẢI LẠI (RETRY)
@@ -907,6 +903,17 @@ class TurboDownloaderEngine:
             vc = (vf.get("vcodec") or "").lower()
             return vc.startswith("avc1") or "h264" in vc
 
+        def _is_1080p_class(vf):
+            h = int(vf.get("height") or 0)
+            w = int(vf.get("width") or 0)
+            if h == 1080:
+                return True
+            if w > 0 and min(h, w) == 1080:
+                return True
+            if w == 1920 and h >= 720:
+                return True
+            return False
+
         def _video_speed_score(vf):
             proto = (vf.get("protocol") or "").lower()
             # ƯU TIÊN SỐ 1 LÀ HTTPS MP4 NGUYÊN BẢN CỦA GOOGLE (itag 137 - y hệt IDM!):
@@ -940,12 +947,12 @@ class TurboDownloaderEngine:
                 )
 
         else:
-            # Mặc định: 1080p_h264 chuẩn dựng phim Premiere / CapCut
-            h1080_avc = [f for f in v_formats if int(f.get("height") or 0) == 1080 and _is_h264(f)]
+            # Mặc định: 1080p_h264 chuẩn dựng phim Premiere / CapCut (hỗ trợ cả video ngang 1920x1080 & dọc 1080x1920)
+            h1080_avc = [f for f in v_formats if _is_1080p_class(f) and _is_h264(f)]
             if h1080_avc:
                 chosen_v = max(h1080_avc, key=_video_speed_score)
             elif allow_lower_fallback:
-                h1080_any = [f for f in v_formats if int(f.get("height") or 0) == 1080]
+                h1080_any = [f for f in v_formats if _is_1080p_class(f)]
                 if h1080_any:
                     chosen_v = max(h1080_any, key=_video_speed_score)
                     need_transcode = True
@@ -1393,7 +1400,7 @@ class TurboDownloaderEngine:
 
             res_profile = task["res_profile"]
             hd_mode = task["hd_mode"]
-            hd_wait_min = max(1, int(self.cfg.get("hd_wait_minutes", 12)))
+            hd_wait_min = max(1, min(int(self.cfg.get("hd_wait_minutes", 4)), 4))
             wait_deadline = time.time() + (hd_wait_min * 60)
 
             # BƯỚC 1: BÓC LINK 1 LẦN DUY NHẤT (TẬN DỤNG BẢN PRE-FETCH 0MS & KHÓA CHỐNG SPAM KIỂU HITOMI)
@@ -1427,8 +1434,10 @@ class TurboDownloaderEngine:
 
                 ts_pub = info.get("release_timestamp") or info.get("timestamp")
                 age_sec = (time.time() - ts_pub) if ts_pub else None
-                is_fresh = (age_sec is None) or (age_sec < 2700)
+                # Video đã đăng > 15 phút (900s) coi như YouTube đã xử lý xong các độ phân giải -> không cần treo chờ 1080p
+                is_fresh = (age_sec is None) or (age_sec < 900)
 
+                waited_so_far = time.perf_counter() - hd_wait_started_ts
                 must_wait_1080 = (
                     res_profile == "1080p_h264"
                     and hd_mode == "wait_hd"
@@ -1443,9 +1452,14 @@ class TurboDownloaderEngine:
                 if selected["video"] is not None:
                     break
 
+                # Nếu YouTube đã có >=1080p (nhưng đang ở VP9/AV1 chưa có avc1), chỉ đợi tối đa 10s rồi lấy & chuyển mã luôn
+                if must_wait_1080 and selected["max_height"] >= 1080 and waited_so_far >= 10.0:
+                    selected = self._select_optimal_pair(info, res_profile=res_profile, allow_lower_fallback=True)
+                    if selected["video"] is not None:
+                        break
+
                 if must_wait_1080:
                     rem = int(wait_deadline - time.time())
-                    waited_so_far = time.perf_counter() - hd_wait_started_ts
                     poll_delay = self._compute_hd_poll_delay(attempt, waited_so_far)
                     task["state"] = "waiting_hd"
                     task["live_speed_mbs"] = 0.0
