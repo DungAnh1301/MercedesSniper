@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QStackedWidget,
     QSystemTrayIcon,
@@ -131,6 +132,7 @@ class SniperMainWindow(QMainWindow):
         self._staged_ready_exe: str = ""
         self._pending_update_info: dict | None = None
         self._update_notified_tag: str = ""
+        self._update_popup_dlg: QDialog | None = None
 
         if not self.cfg.get("per_channel_tpl_v1"):
             self.cfg["per_channel_tpl_v1"] = True
@@ -147,11 +149,11 @@ class SniperMainWindow(QMainWindow):
         self._refresh_disk_space()
         # Quét ngầm danh sách Project CapCut sau khi cửa sổ đã mở mượt mà (0.00ms khựng GUI!)
         QTimer.singleShot(250, lambda: self._handle_reload_capcut_templates(show_feedback=False))
-        # Kiểm tra & TỰ ĐỘNG CẬP NHẬT phiên bản mới trên GitHub Releases hoàn toàn ngầm (0.00ms khựng GUI!)
+        # Kiểm tra phiên bản mới trên GitHub Releases ngầm mỗi 90 giây (0.00ms khựng GUI!) -> có bản mới là hiện ngay để bấm tải!
         QTimer.singleShot(1500, lambda: self._start_update_check(manual=False))
         self._upd_timer = QTimer(self)
         self._upd_timer.timeout.connect(lambda: self._start_update_check(manual=False))
-        self._upd_timer.start(3 * 60 * 1000)
+        self._upd_timer.start(90 * 1000)
 
         # Timer nhẹ nhàng (220ms = ~4.5Hz) chỉ đọc hàng đợi kết quả từ Tiến trình Worker Độc lập
         self._ipc_timer = QTimer(self)
@@ -309,7 +311,75 @@ class SniperMainWindow(QMainWindow):
         self.stack.addWidget(self.page_settings)
 
         self.nav_group.idClicked.connect(self._on_nav_tab_switched)
-        root.addWidget(self.stack, 1)
+
+        # Thanh thông báo Cập nhật 1-Click nổi bật ngay trên đầu giao diện
+        self.update_banner = QFrame()
+        self.update_banner.setVisible(False)
+        self.update_banner.setStyleSheet(
+            "QFrame { background-color: #064E3B; border-bottom: 1px solid #10B981; }"
+        )
+        ub_lay = QHBoxLayout(self.update_banner)
+        ub_lay.setContentsMargins(16, 9, 14, 9)
+        ub_lay.setSpacing(12)
+
+        ub_txt_col = QVBoxLayout()
+        ub_txt_col.setContentsMargins(0, 0, 0, 0)
+        ub_txt_col.setSpacing(2)
+        self.lbl_upd_title = QLabel("🚀 Đã có phiên bản mới!")
+        self.lbl_upd_title.setStyleSheet(
+            "color: #ECFDF5; font-size: 13px; font-weight: 800; background: transparent; border: none;"
+        )
+        self.lbl_upd_notes = QLabel("")
+        self.lbl_upd_notes.setStyleSheet(
+            "color: #A7F3D0; font-size: 11.5px; background: transparent; border: none;"
+        )
+        ub_txt_col.addWidget(self.lbl_upd_title)
+        ub_txt_col.addWidget(self.lbl_upd_notes)
+        ub_lay.addLayout(ub_txt_col, 1)
+
+        self.bar_upd_progress = QProgressBar()
+        self.bar_upd_progress.setVisible(False)
+        self.bar_upd_progress.setRange(0, 100)
+        self.bar_upd_progress.setFixedSize(170, 18)
+        self.bar_upd_progress.setTextVisible(True)
+        self.bar_upd_progress.setStyleSheet(
+            "QProgressBar { background-color: #022C22; color: #FFFFFF; border: 1px solid #10B981; "
+            "border-radius: 6px; text-align: center; font-size: 10.5px; font-weight: 700; }"
+            "QProgressBar::chunk { background-color: #10B981; border-radius: 5px; }"
+        )
+        ub_lay.addWidget(self.bar_upd_progress)
+
+        self.btn_upd_banner_dl = QPushButton("⬇ Tải & Cập nhật ngay")
+        self.btn_upd_banner_dl.setFixedHeight(32)
+        self.btn_upd_banner_dl.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_upd_banner_dl.setStyleSheet(
+            "QPushButton { background-color: #10B981; color: #022C22; border: none; "
+            "border-radius: 6px; font-size: 12px; font-weight: 800; padding: 0 14px; }"
+            "QPushButton:hover { background-color: #34D399; color: #022C22; }"
+            "QPushButton:disabled { background-color: #047857; color: #D1FAE5; }"
+        )
+        self.btn_upd_banner_dl.clicked.connect(self._on_one_click_update_triggered)
+        ub_lay.addWidget(self.btn_upd_banner_dl)
+
+        self.btn_upd_banner_hide = QPushButton("✕")
+        self.btn_upd_banner_hide.setFixedSize(26, 26)
+        self.btn_upd_banner_hide.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_upd_banner_hide.setToolTip("Ẩn thanh thông báo (vẫn có thể bấm nút Cập nhật ở góc dưới trái)")
+        self.btn_upd_banner_hide.setStyleSheet(
+            "QPushButton { background: transparent; color: #A7F3D0; border: none; font-size: 13px; font-weight: 700; }"
+            "QPushButton:hover { color: #FFFFFF; background-color: rgba(255,255,255,0.12); border-radius: 4px; }"
+        )
+        self.btn_upd_banner_hide.clicked.connect(lambda: self.update_banner.setVisible(False))
+        ub_lay.addWidget(self.btn_upd_banner_hide)
+
+        right_panel = QWidget()
+        rp_lay = QVBoxLayout(right_panel)
+        rp_lay.setContentsMargins(0, 0, 0, 0)
+        rp_lay.setSpacing(0)
+        rp_lay.addWidget(self.update_banner)
+        rp_lay.addWidget(self.stack, 1)
+
+        root.addWidget(right_panel, 1)
 
     def _switch_to_tab(self, idx: int):
         btn = self.nav_group.button(idx)
@@ -1512,9 +1582,127 @@ class SniperMainWindow(QMainWindow):
             self._apply_update_and_restart(self._staged_ready_exe, silent=False)
             return
         if self._pending_update_info and self._pending_update_info.get("has_update"):
-            self._prompt_and_start_update_download(self._pending_update_info)
+            self._refresh_update_banner(self._pending_update_info)
+            self._show_update_popup_card(self._pending_update_info)
             return
         self._start_update_check(manual=True)
+
+    def _on_one_click_update_triggered(self):
+        if self._update_popup_dlg is not None:
+            try:
+                self._update_popup_dlg.close()
+            except Exception:
+                pass
+            self._update_popup_dlg = None
+        if self._update_downloading:
+            return
+        if self._staged_ready_exe and os.path.isfile(self._staged_ready_exe):
+            self._apply_update_and_restart(self._staged_ready_exe, silent=False)
+            return
+        if self._pending_update_info and self._pending_update_info.get("has_update"):
+            self._begin_update_download(self._pending_update_info, silent=False)
+
+    def _refresh_update_banner(self, info: dict):
+        new_ver = info.get("latest_version") or ""
+        size_mb = (int(info.get("size_bytes") or 0)) / (1024 * 1024)
+        size_txt = f" (~{size_mb:.1f} MB)" if size_mb > 1 else ""
+        notes_one = re.sub(r"\s+", " ", (info.get("notes") or "Bản cập nhật mới đã sẵn sàng để tải về!").strip())
+        if len(notes_one) > 115:
+            notes_one = notes_one[:112] + "..."
+        self.lbl_upd_title.setText(f"🚀 Đã có phiên bản mới Mercedes Sniper v{new_ver}{size_txt}!")
+        self.lbl_upd_notes.setText(f"📝 {notes_one}")
+        if not self._update_downloading:
+            self.bar_upd_progress.setVisible(False)
+            self.btn_upd_banner_dl.setEnabled(True)
+            if self._staged_ready_exe and os.path.isfile(self._staged_ready_exe):
+                self.btn_upd_banner_dl.setText(f"⚡ Khởi động lên v{new_ver} ngay")
+            else:
+                self.btn_upd_banner_dl.setText("⬇ Tải & Cập nhật ngay")
+        self.update_banner.setVisible(True)
+
+    def _show_update_popup_card(self, info: dict):
+        if self._update_downloading:
+            return
+        if self._update_popup_dlg is not None:
+            try:
+                if self._update_popup_dlg.isVisible():
+                    self._update_popup_dlg.raise_()
+                    return
+            except Exception:
+                pass
+
+        new_ver = info.get("latest_version") or ""
+        size_mb = (int(info.get("size_bytes") or 0)) / (1024 * 1024)
+        size_txt = f"~{size_mb:.1f} MB" if size_mb > 1 else "Bản mới nhất"
+        notes = (info.get("notes") or "Tối ưu hiệu năng & khắc phục lỗi.").strip()
+        if len(notes) > 500:
+            notes = notes[:500] + "..."
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Phiên bản mới v{new_ver} đã sẵn sàng!")
+        dlg.setWindowModality(Qt.WindowModality.NonModal)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        dlg.setFixedWidth(460)
+        dlg.setStyleSheet(
+            "QDialog { background-color: #0F172A; border: 1px solid #10B981; border-radius: 10px; }"
+            "QLabel { background: transparent; }"
+        )
+
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(22, 20, 22, 18)
+        lay.setSpacing(12)
+
+        lbl_head = QLabel(f"🚀 CÓ PHIÊN BẢN MỚI: v{new_ver}")
+        lbl_head.setStyleSheet("color: #34D399; font-size: 16px; font-weight: 900;")
+        lay.addWidget(lbl_head)
+
+        lbl_meta = QLabel(f"Đang dùng: v{APP_VERSION}   •   Bản mới: v{new_ver} ({size_txt})")
+        lbl_meta.setStyleSheet("color: #94A3B8; font-size: 12px; font-weight: 600;")
+        lay.addWidget(lbl_meta)
+
+        notes_box = QFrame()
+        notes_box.setStyleSheet(
+            "QFrame { background-color: #1E293B; border: 1px solid #334155; border-radius: 8px; }"
+        )
+        nb_lay = QVBoxLayout(notes_box)
+        nb_lay.setContentsMargins(12, 10, 12, 10)
+        lbl_notes = QLabel(notes)
+        lbl_notes.setWordWrap(True)
+        lbl_notes.setStyleSheet("color: #E2E8F0; font-size: 12.5px; border: none;")
+        nb_lay.addWidget(lbl_notes)
+        lay.addWidget(notes_box)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
+
+        btn_later = QPushButton("Để sau")
+        btn_later.setFixedHeight(36)
+        btn_later.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_later.setStyleSheet(
+            "QPushButton { background-color: #1E293B; color: #CBD5E1; border: 1px solid #475569; "
+            "border-radius: 7px; font-size: 12px; font-weight: 700; padding: 0 16px; }"
+            "QPushButton:hover { background-color: #334155; color: #FFFFFF; }"
+        )
+        btn_later.clicked.connect(dlg.close)
+
+        btn_go = QPushButton(f"⬇ Tải về & Cập nhật lên v{new_ver} ngay")
+        btn_go.setFixedHeight(36)
+        btn_go.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_go.setStyleSheet(
+            "QPushButton { background-color: #10B981; color: #022C22; border: none; "
+            "border-radius: 7px; font-size: 12.5px; font-weight: 800; padding: 0 18px; }"
+            "QPushButton:hover { background-color: #34D399; color: #022C22; }"
+        )
+        btn_go.clicked.connect(self._on_one_click_update_triggered)
+
+        btn_row.addWidget(btn_later)
+        btn_row.addWidget(btn_go, 1)
+        lay.addLayout(btn_row)
+
+        self._update_popup_dlg = dlg
+        dlg.destroyed.connect(lambda *_: setattr(self, "_update_popup_dlg", None))
+        dlg.show()
+        dlg.raise_()
 
     def _start_update_check(self, manual: bool = False):
         if self._update_checking or self._update_downloading:
@@ -1550,34 +1738,35 @@ class SniperMainWindow(QMainWindow):
             new_ver = info.get("latest_version") or ""
             tag = info.get("tag_name") or f"v{new_ver}"
             self.btn_update.setText(f"🚀 Nâng cấp v{new_ver}!")
-            self.btn_update.setToolTip(f"Đã có phiên bản mới {tag} trên GitHub! Đang tự động nâng cấp.")
+            self.btn_update.setToolTip(f"Đã có phiên bản mới {tag}! Bấm để tải & cập nhật ngay.")
             self.btn_update.setStyleSheet(
                 "QPushButton { background-color: #059669; color: #FFFFFF; border: 1px solid #10B981; "
                 "border-radius: 5px; font-size: 11px; font-weight: 800; padding: 2px 6px; }"
                 "QPushButton:hover { background-color: #10B981; color: #FFFFFF; }"
             )
+            self._refresh_update_banner(info)
+
             if manual:
-                self._prompt_and_start_update_download(info)
-            else:
-                if self._update_notified_tag != tag:
-                    self._update_notified_tag = tag
-                    self._append_log(
-                        f"🚀 Phát hiện bản cập nhật mới {tag} trên GitHub — đang tự động tải ngầm & nâng cấp..."
+                self._show_update_popup_card(info)
+            elif self._update_notified_tag != tag:
+                self._update_notified_tag = tag
+                self._append_log(
+                    f"🚀 Đã có bản cập nhật mới {tag}! Bấm nút [⬇ Tải & Cập nhật ngay] trên thanh thông báo để nâng cấp."
+                )
+                try:
+                    self.tray.showMessage(
+                        f"🚀 Đã có Mercedes Sniper {tag} mới!",
+                        "Mở ứng dụng và bấm [⬇ Tải & Cập nhật ngay] để nâng cấp phiên bản mới nhất.",
+                        QSystemTrayIcon.MessageIcon.Information,
+                        6000,
                     )
-                    try:
-                        self.tray.showMessage(
-                            f"Đang tự động cập nhật Mercedes Sniper {tag}",
-                            "Tool đang tải ngầm bản mới nhất và sẽ tự động khởi động lại khi hoàn tất!",
-                            QSystemTrayIcon.MessageIcon.Information,
-                            4500,
-                        )
-                    except Exception:
-                        pass
-                # TỰ ĐỘNG TẢI NGẦM & NÂNG CẤP LUÔN 100% KHÔNG CẦN BẤM NÚT!
-                if getattr(sys, "frozen", False):
-                    self._begin_update_download(info, silent=True)
+                except Exception:
+                    pass
+                if self.isVisible():
+                    self._show_update_popup_card(info)
         else:
             self._pending_update_info = None
+            self.update_banner.setVisible(False)
             self.btn_update.setText(f"🔄 Cập nhật (v{APP_VERSION})")
             if manual:
                 QMessageBox.information(
@@ -1593,7 +1782,13 @@ class SniperMainWindow(QMainWindow):
         self._update_downloading = True
         self._update_silent_mode = silent
         self.btn_update.setEnabled(False)
-        self.btn_update.setText("⬇ Tự cập nhật 0%..." if silent else "⬇ Đang tải 0%...")
+        self.btn_update.setText("⬇ Đang tải 0%...")
+        self.update_banner.setVisible(True)
+        self.bar_upd_progress.setValue(0)
+        self.bar_upd_progress.setFormat("0%")
+        self.bar_upd_progress.setVisible(True)
+        self.btn_upd_banner_dl.setEnabled(False)
+        self.btn_upd_banner_dl.setText("⬇ Đang tải 0%...")
         self._append_log(f"⬇ Đang tải bản cập nhật v{new_ver} từ GitHub Releases...")
 
         def _dl_worker():
@@ -1610,63 +1805,43 @@ class SniperMainWindow(QMainWindow):
 
         threading.Thread(target=_dl_worker, daemon=True, name="GitHubUpdateDownload").start()
 
-    def _prompt_and_start_update_download(self, info: dict):
-        if self._update_downloading:
-            return
-        new_ver = info.get("latest_version") or ""
-        size_mb = (int(info.get("size_bytes") or 0)) / (1024 * 1024)
-        size_txt = f" (~{size_mb:.1f} MB)" if size_mb > 1 else ""
-        notes = (info.get("notes") or "Tối ưu hiệu năng & bổ sung tính năng mới.").strip()
-        if len(notes) > 420:
-            notes = notes[:420] + "..."
-
-        active_dl = self._count_active_downloads()
-        warn_dl = (
-            f"\n\n⚠️ Lưu ý: Đang có {active_dl} tác vụ tải hoạt động — cập nhật sẽ khởi động lại ứng dụng."
-            if active_dl > 0
-            else ""
-        )
-
-        ans = QMessageBox.question(
-            self,
-            f"Cập nhật Mercedes Sniper v{new_ver}",
-            f"🚀 Đã có phiên bản mới v{new_ver}{size_txt} trên GitHub!\n"
-            f"Phiên bản hiện tại: v{APP_VERSION}\n\n"
-            f"📝 Nội dung cập nhật:\n{notes}{warn_dl}\n\n"
-            f"Bạn có muốn tự động tải về và nâng cấp ngay bây giờ không?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes,
-        )
-        if ans != QMessageBox.StandardButton.Yes:
-            return
-        self._begin_update_download(info, silent=False)
-
     def _ui_on_update_dl_progress(self, pct: int, cur_mb: float, tot_mb: float):
-        prefix = "⬇ Tự cập nhật" if self._update_silent_mode else "⬇ Đang tải"
-        self.btn_update.setText(f"{prefix} {pct}%...")
+        self.btn_update.setText(f"⬇ Đang tải {pct}%...")
+        self.bar_upd_progress.setValue(max(0, min(100, pct)))
+        if tot_mb > 0:
+            self.bar_upd_progress.setFormat(f"{pct}% ({cur_mb:.0f}/{tot_mb:.0f} MB)")
+        else:
+            self.bar_upd_progress.setFormat(f"{pct}%")
+        self.btn_upd_banner_dl.setText(f"⬇ Đang tải {pct}%...")
 
     def _ui_on_update_dl_done(self, ok: bool, path_or_err: str):
         self._update_downloading = False
         self.btn_update.setEnabled(True)
+        self.btn_upd_banner_dl.setEnabled(True)
         if not ok:
             ver = (self._pending_update_info or {}).get("latest_version") or APP_VERSION
             self.btn_update.setText(f"🚀 Nâng cấp v{ver}!")
+            self.bar_upd_progress.setVisible(False)
+            self.btn_upd_banner_dl.setText("⬇ Thử tải lại")
             self._append_log(f"❌ Lỗi tải bản cập nhật: {path_or_err}")
             if not self._update_silent_mode:
                 QMessageBox.warning(self, "Lỗi cập nhật", f"Không thể tải bản cập nhật:\n{path_or_err}")
             return
 
+        self.bar_upd_progress.setValue(100)
+        self.bar_upd_progress.setFormat("100% • Đang cài đặt...")
         self._staged_ready_exe = path_or_err
-        if self._update_silent_mode and self._count_active_downloads() > 0:
+        if self._count_active_downloads() > 0:
             ver = (self._pending_update_info or {}).get("latest_version") or APP_VERSION
             self.btn_update.setText(f"⚡ Xong tải sẽ lên v{ver}")
+            self.btn_upd_banner_dl.setText(f"⚡ Áp dụng ngay v{ver}")
             self._append_log(
-                f"✅ Đã tải sẵn bản v{ver}! Đang chờ video hiện tại tải xong sẽ tự động khởi động lại nâng cấp..."
+                f"✅ Đã tải xong bản v{ver}! Đang chờ video hiện tại tải xong sẽ tự động khởi động lại nâng cấp..."
             )
             if not hasattr(self, "_staged_wait_timer"):
                 self._staged_wait_timer = QTimer(self)
                 self._staged_wait_timer.timeout.connect(self._try_auto_apply_staged)
-            self._staged_wait_timer.start(4000)
+            self._staged_wait_timer.start(3000)
             return
 
         self._apply_update_and_restart(path_or_err, silent=self._update_silent_mode)

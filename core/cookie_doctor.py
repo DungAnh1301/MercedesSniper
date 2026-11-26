@@ -25,7 +25,7 @@ import yt_dlp
 from core.history_store import BASE_DIR
 
 COOKIE_RUNTIME_DIR = os.path.join(BASE_DIR, ".yt_cookie_runtime")
-TEST_YOUTUBE_URL = "https://www.youtube.com/watch?v=jNQXAC9IVRw"
+TEST_YOUTUBE_URL = "https://www.youtube.com/watch?v=aqz-KE-bpKQ"
 
 
 def _cleanup_old_runtime_cookies():
@@ -286,6 +286,7 @@ def verify_youtube_cookies(cfg: dict, caps: dict | None = None) -> dict:
             "cachedir": YT_CACHE_DIR,
             "socket_timeout": 14,
             "proxy": "",
+            "extractor_args": {"youtube": {"player_js_variant": ["actual"]}},
         }
         if caps.get("ffmpeg_dir"):
             opts_ck["ffmpeg_location"] = caps["ffmpeg_dir"]

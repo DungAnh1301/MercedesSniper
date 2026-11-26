@@ -455,6 +455,7 @@ class TurboDownloaderEngine:
             js_exe = self.caps.get("node_exe")
             opts["js_runtimes"] = {js_kind: {"path": js_exe} if js_exe else {}}
             opts["remote_components"] = ["ejs:github"]
+            opts["extractor_args"] = {"youtube": {"player_js_variant": ["actual"]}}
 
         if player_clients:
             opts["extractor_args"] = {"youtube": {"player_client": list(player_clients)}}
