@@ -8,6 +8,7 @@ from datetime import datetime
 import os
 import re
 import shutil
+import sys
 import threading
 import webbrowser
 
@@ -33,9 +34,7 @@ from PyQt6.QtWidgets import (
 
 from core.capcut_injector import (
     BLANK_TEMPLATE_KEY,
-    auto_open_latest_capcut_project,
     get_capcut_draft_root,
-    has_active_capcut_editor_window,
     has_visible_capcut_window,
     list_capcut_templates,
     scan_all_capcut_projects,
@@ -128,6 +127,8 @@ class SniperMainWindow(QMainWindow):
         self._templates_dirty = False
         self._update_checking = False
         self._update_downloading = False
+        self._update_silent_mode = False
+        self._staged_ready_exe: str = ""
         self._pending_update_info: dict | None = None
         self._update_notified_tag: str = ""
 
@@ -146,11 +147,11 @@ class SniperMainWindow(QMainWindow):
         self._refresh_disk_space()
         # Quét ngầm danh sách Project CapCut sau khi cửa sổ đã mở mượt mà (0.00ms khựng GUI!)
         QTimer.singleShot(250, lambda: self._handle_reload_capcut_templates(show_feedback=False))
-        # Kiểm tra phiên bản mới trên GitHub Releases hoàn toàn ngầm (0.00ms khựng GUI!)
-        QTimer.singleShot(1800, lambda: self._start_update_check(manual=False))
+        # Kiểm tra & TỰ ĐỘNG CẬP NHẬT phiên bản mới trên GitHub Releases hoàn toàn ngầm (0.00ms khựng GUI!)
+        QTimer.singleShot(1500, lambda: self._start_update_check(manual=False))
         self._upd_timer = QTimer(self)
         self._upd_timer.timeout.connect(lambda: self._start_update_check(manual=False))
-        self._upd_timer.start(30 * 60 * 1000)
+        self._upd_timer.start(3 * 60 * 1000)
 
         # Timer nhẹ nhàng (220ms = ~4.5Hz) chỉ đọc hàng đợi kết quả từ Tiến trình Worker Độc lập
         self._ipc_timer = QTimer(self)
@@ -1262,24 +1263,8 @@ class SniperMainWindow(QMainWindow):
 
         t["_last_used_tpl"] = tpl_name
         title = t.get("title") or ""
-        has_editor, editor_title = has_active_capcut_editor_window()
-
-        if not auto_mode and has_editor:
-            ans = QMessageBox.question(
-                self,
-                "CapCut đang mở dự án khác",
-                f"CapCut đang mở sẵn dự án '{editor_title}'.\n"
-                "Bạn có muốn chuyển sang mở thẳng vào Timeline của Project mới ngay bây giờ không?\n\n"
-                "• Chọn Yes: Tự làm mới CapCut & nhảy thẳng vào trong Project mới.\n"
-                "• Chọn No: Vẫn tạo sẵn Project mới trong kho nháp mà không đóng dự án đang sửa.",
-            )
-            should_launch = ans == QMessageBox.StandardButton.Yes
-            force_restart = should_launch
-        else:
-            should_launch = (not auto_mode) or (not has_editor)
-            force_restart = should_launch
-
-        t["_auto_enter_capcut"] = bool(should_launch)
+        # Chỉ tự bật CapCut nếu CapCut đang tắt (không tự tắt mở lại, không click ẩn làm phiền!)
+        should_launch = not has_visible_capcut_window()
 
         self.downloader.apply_capcut_async(
             vid=vid,
@@ -1287,19 +1272,13 @@ class SniperMainWindow(QMainWindow):
             video_title=title,
             template_name=tpl_name,
             auto_launch_capcut=should_launch,
-            force_restart_if_open=force_restart,
+            force_restart_if_open=False,
         )
 
     def _ui_on_capcut_done(self, vid: str, ok: bool, msg: str, draft_name: str):
         if ok:
             self._append_log(f"✂️ [CAPCUT 1-CLICK] {msg}")
             t = self._task_cache.get(vid)
-            if t and t.pop("_auto_enter_capcut", False):
-                threading.Thread(
-                    target=auto_open_latest_capcut_project,
-                    daemon=True,
-                    name="CapCutAutoEnter",
-                ).start()
             used_tpl = (t.get("_last_used_tpl") if t else None) or BLANK_TEMPLATE_KEY
             if t:
                 base_st = re.sub(r"\s*•\s*✂️ Đã tạo:.*$", "", t.get("status_text") or "")
@@ -1424,11 +1403,21 @@ class SniperMainWindow(QMainWindow):
             pop.show()
 
     # ==========================================================
-    # 🚀 TỰ ĐỘNG CẬP NHẬT QUA GITHUB RELEASES (0MS KHỰNG GUI)
+    # 🚀 TỰ ĐỘNG CẬP NHẬT QUA GITHUB RELEASES (100% TỰ ĐỘNG NGẦM 0 CHẠM)
     # ==========================================================
+    def _count_active_downloads(self) -> int:
+        return sum(
+            1
+            for t in self._task_cache.values()
+            if t.get("state") in ("downloading", "queued", "waiting_hd", "merging")
+        )
+
     def _on_update_button_clicked(self):
-        self._restore_from_tray()
+        self._restore_from_tray(check_upd=False)
         if self._update_downloading:
+            return
+        if self._staged_ready_exe and os.path.isfile(self._staged_ready_exe):
+            self._apply_update_and_restart(self._staged_ready_exe, silent=False)
             return
         if self._pending_update_info and self._pending_update_info.get("has_update"):
             self._prompt_and_start_update_download(self._pending_update_info)
@@ -1437,6 +1426,9 @@ class SniperMainWindow(QMainWindow):
 
     def _start_update_check(self, manual: bool = False):
         if self._update_checking or self._update_downloading:
+            return
+        if (not manual) and self._staged_ready_exe and os.path.isfile(self._staged_ready_exe):
+            self._try_auto_apply_staged()
             return
         self._update_checking = True
         if manual:
@@ -1466,7 +1458,7 @@ class SniperMainWindow(QMainWindow):
             new_ver = info.get("latest_version") or ""
             tag = info.get("tag_name") or f"v{new_ver}"
             self.btn_update.setText(f"🚀 Nâng cấp v{new_ver}!")
-            self.btn_update.setToolTip(f"Đã có phiên bản mới {tag} trên GitHub! Bấm để tải & cập nhật tự động.")
+            self.btn_update.setToolTip(f"Đã có phiên bản mới {tag} trên GitHub! Đang tự động nâng cấp.")
             self.btn_update.setStyleSheet(
                 "QPushButton { background-color: #059669; color: #FFFFFF; border: 1px solid #10B981; "
                 "border-radius: 5px; font-size: 11px; font-weight: 800; padding: 2px 6px; }"
@@ -1474,20 +1466,24 @@ class SniperMainWindow(QMainWindow):
             )
             if manual:
                 self._prompt_and_start_update_download(info)
-            elif self._update_notified_tag != tag:
-                self._update_notified_tag = tag
-                self._append_log(
-                    f"🚀 Đã có bản cập nhật mới {tag} trên GitHub! Bấm nút [🚀 Nâng cấp v{new_ver}!] góc trái để cập nhật 1 chạm."
-                )
-                try:
-                    self.tray.showMessage(
-                        f"Mercedes Sniper {tag} đã ra mắt!",
-                        "Bấm nút [🚀 Nâng cấp] ở góc dưới thanh trái để tự động cập nhật bản mới nhất.",
-                        QSystemTrayIcon.MessageIcon.Information,
-                        4500,
+            else:
+                if self._update_notified_tag != tag:
+                    self._update_notified_tag = tag
+                    self._append_log(
+                        f"🚀 Phát hiện bản cập nhật mới {tag} trên GitHub — đang tự động tải ngầm & nâng cấp..."
                     )
-                except Exception:
-                    pass
+                    try:
+                        self.tray.showMessage(
+                            f"Đang tự động cập nhật Mercedes Sniper {tag}",
+                            "Tool đang tải ngầm bản mới nhất và sẽ tự động khởi động lại khi hoàn tất!",
+                            QSystemTrayIcon.MessageIcon.Information,
+                            4500,
+                        )
+                    except Exception:
+                        pass
+                # TỰ ĐỘNG TẢI NGẦM & NÂNG CẤP LUÔN 100% KHÔNG CẦN BẤM NÚT!
+                if getattr(sys, "frozen", False):
+                    self._begin_update_download(info, silent=True)
         else:
             self._pending_update_info = None
             self.btn_update.setText(f"🔄 Cập nhật (v{APP_VERSION})")
@@ -1497,6 +1493,30 @@ class SniperMainWindow(QMainWindow):
                     "Đã là bản mới nhất",
                     f"✅ Bạn đang sử dụng phiên bản mới nhất (v{APP_VERSION}) trên GitHub!",
                 )
+
+    def _begin_update_download(self, info: dict, silent: bool = False):
+        if self._update_downloading:
+            return
+        new_ver = info.get("latest_version") or ""
+        self._update_downloading = True
+        self._update_silent_mode = silent
+        self.btn_update.setEnabled(False)
+        self.btn_update.setText("⬇ Tự cập nhật 0%..." if silent else "⬇ Đang tải 0%...")
+        self._append_log(f"⬇ Đang tải bản cập nhật v{new_ver} từ GitHub Releases...")
+
+        def _dl_worker():
+            try:
+                staged_path = download_update_asset(
+                    info,
+                    progress_cb=lambda pct, cur_mb, tot_mb: self.signals.sig_update_dl_progress.emit(
+                        pct, cur_mb, tot_mb
+                    ),
+                )
+                self.signals.sig_update_dl_done.emit(True, staged_path)
+            except Exception as exc:
+                self.signals.sig_update_dl_done.emit(False, str(exc))
+
+        threading.Thread(target=_dl_worker, daemon=True, name="GitHubUpdateDownload").start()
 
     def _prompt_and_start_update_download(self, info: dict):
         if self._update_downloading:
@@ -1508,11 +1528,7 @@ class SniperMainWindow(QMainWindow):
         if len(notes) > 420:
             notes = notes[:420] + "..."
 
-        active_dl = sum(
-            1
-            for t in self._task_cache.values()
-            if t.get("state") in ("downloading", "queued", "waiting_hd", "merging")
-        )
+        active_dl = self._count_active_downloads()
         warn_dl = (
             f"\n\n⚠️ Lưu ý: Đang có {active_dl} tác vụ tải hoạt động — cập nhật sẽ khởi động lại ứng dụng."
             if active_dl > 0
@@ -1531,28 +1547,11 @@ class SniperMainWindow(QMainWindow):
         )
         if ans != QMessageBox.StandardButton.Yes:
             return
-
-        self._update_downloading = True
-        self.btn_update.setEnabled(False)
-        self.btn_update.setText("⬇ Đang tải 0%...")
-        self._append_log(f"⬇ Đang tải bản cập nhật v{new_ver} từ GitHub Releases...")
-
-        def _dl_worker():
-            try:
-                staged_path = download_update_asset(
-                    info,
-                    progress_cb=lambda pct, cur_mb, tot_mb: self.signals.sig_update_dl_progress.emit(
-                        pct, cur_mb, tot_mb
-                    ),
-                )
-                self.signals.sig_update_dl_done.emit(True, staged_path)
-            except Exception as exc:
-                self.signals.sig_update_dl_done.emit(False, str(exc))
-
-        threading.Thread(target=_dl_worker, daemon=True, name="GitHubUpdateDownload").start()
+        self._begin_update_download(info, silent=False)
 
     def _ui_on_update_dl_progress(self, pct: int, cur_mb: float, tot_mb: float):
-        self.btn_update.setText(f"⬇ Đang tải {pct}%...")
+        prefix = "⬇ Tự cập nhật" if self._update_silent_mode else "⬇ Đang tải"
+        self.btn_update.setText(f"{prefix} {pct}%...")
 
     def _ui_on_update_dl_done(self, ok: bool, path_or_err: str):
         self._update_downloading = False
@@ -1561,13 +1560,41 @@ class SniperMainWindow(QMainWindow):
             ver = (self._pending_update_info or {}).get("latest_version") or APP_VERSION
             self.btn_update.setText(f"🚀 Nâng cấp v{ver}!")
             self._append_log(f"❌ Lỗi tải bản cập nhật: {path_or_err}")
-            QMessageBox.warning(self, "Lỗi cập nhật", f"Không thể tải bản cập nhật:\n{path_or_err}")
+            if not self._update_silent_mode:
+                QMessageBox.warning(self, "Lỗi cập nhật", f"Không thể tải bản cập nhật:\n{path_or_err}")
             return
 
-        applied, msg = launch_self_updater(path_or_err)
+        self._staged_ready_exe = path_or_err
+        if self._update_silent_mode and self._count_active_downloads() > 0:
+            ver = (self._pending_update_info or {}).get("latest_version") or APP_VERSION
+            self.btn_update.setText(f"⚡ Xong tải sẽ lên v{ver}")
+            self._append_log(
+                f"✅ Đã tải sẵn bản v{ver}! Đang chờ video hiện tại tải xong sẽ tự động khởi động lại nâng cấp..."
+            )
+            if not hasattr(self, "_staged_wait_timer"):
+                self._staged_wait_timer = QTimer(self)
+                self._staged_wait_timer.timeout.connect(self._try_auto_apply_staged)
+            self._staged_wait_timer.start(4000)
+            return
+
+        self._apply_update_and_restart(path_or_err, silent=self._update_silent_mode)
+
+    def _try_auto_apply_staged(self):
+        if not self._staged_ready_exe or not os.path.isfile(self._staged_ready_exe):
+            if hasattr(self, "_staged_wait_timer"):
+                self._staged_wait_timer.stop()
+            return
+        if self._count_active_downloads() == 0:
+            if hasattr(self, "_staged_wait_timer"):
+                self._staged_wait_timer.stop()
+            self._apply_update_and_restart(self._staged_ready_exe, silent=True)
+
+    def _apply_update_and_restart(self, exe_path: str, silent: bool = False):
+        applied, msg = launch_self_updater(exe_path)
         if not applied:
             self.btn_update.setText(f"🔄 Cập nhật (v{APP_VERSION})")
-            QMessageBox.information(self, "Đã tải gói cập nhật", msg)
+            if not silent:
+                QMessageBox.information(self, "Đã tải gói cập nhật", msg)
             return
 
         self._append_log(f"✅ {msg}")
@@ -1649,10 +1676,12 @@ class SniperMainWindow(QMainWindow):
             win.show()
             QApplication.instance()._main_win_ref = win
 
-    def _restore_from_tray(self):
+    def _restore_from_tray(self, check_upd: bool = True):
         self.showNormal()
         self.activateWindow()
         self.raise_()
+        if check_upd:
+            self._start_update_check(manual=False)
 
     def _quit_completely(self):
         self._force_quit = True
