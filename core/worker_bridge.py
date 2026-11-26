@@ -13,25 +13,12 @@ import sys
 import threading
 
 
-def _lower_worker_priority():
-    if os.name == "nt":
-        try:
-            import ctypes
-            BELOW_NORMAL_PRIORITY_CLASS = 0x00004000
-            handle = ctypes.windll.kernel32.GetCurrentProcess()
-            ctypes.windll.kernel32.SetPriorityClass(handle, BELOW_NORMAL_PRIORITY_CLASS)
-        except Exception:
-            pass
-
-
 def _worker_entry_point(cmd_q: multiprocessing.Queue, evt_q: multiprocessing.Queue, cfg: dict):
-    """Hàm chính chạy trong Tiến trình Worker Độc lập (không nạp PyQt6, không chạm tới GUI)."""
+    """Hàm chính chạy trong Tiến trình Worker Độc lập (không nạp PyQt6, không chạm tới GUI, chạy 100% tốc độ CPU/IO)."""
     if sys.stdout is None:
         sys.stdout = open(os.devnull, "w", encoding="utf-8")
     if sys.stderr is None:
         sys.stderr = open(os.devnull, "w", encoding="utf-8")
-
-    _lower_worker_priority()
 
     from core.capcut_injector import (
         create_capcut_draft_from_template,

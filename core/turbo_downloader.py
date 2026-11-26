@@ -267,6 +267,7 @@ class TurboDownloaderEngine:
         self._extract_gate = threading.Lock()
         self._last_extract_done_ts = 0.0
         self._cookie_required_vids: set[str] = set()
+        self._bot_gate_until = 0.0
 
         self._http_session = requests.Session()
         # Đi thẳng IP dân cư VNPT sạch (box_proxy = 0 kiểu Hitomi), không dính System Proxy/Env Proxy rác
@@ -491,77 +492,95 @@ class TurboDownloaderEngine:
         cancel_ev: threading.Event | None = None,
     ) -> dict:
         """
-        Cơ chế bóc link 2 tầng kết hợp tinh hoa Hitomi (`youtube_patch.hds` + `curl_cffi` + Cookie Vault):
-        - Tầng 1 (Stealth Apple/Safari + Safari TLS, KHÔNG tốn Cookie): Bóc siêu tốc ~2.0s lấy đủ
-          1080p HLS + HTTPS + 4K, né lỗi JS player mới và bảo vệ tuyệt đối tài khoản Cookie của bạn!
-        - Tầng 2 (Cookie Sống + Chrome TLS): Tự động kích hoạt ngay nếu gặp video giới hạn độ tuổi,
-          hội viên, riêng tư hoặc yêu cầu xác thực đăng nhập.
+        Cơ chế bóc link siêu tốc chuẩn MP4 gốc (itag 137 + 140 y hệt IDM):
+        - Tầng 1 (`visionos` 1-API-call + Safari TLS): Chỉ tốn 1 vòng gọi JSON lấy thẳng luồng HTTPS MP4 gốc
+          1080p H.264 & M4A (nhanh gấp đôi so với tải m3u8 thừa, không tốn Cookie).
+        - Tầng 2 (Kho Cookie xác thực + Chrome TLS): Kích hoạt tức thì (0ms delay nội bộ) nếu gặp kênh
+          giới hạn tuổi / hội viên hoặc mạng đang bị hỏi xác thực Bot.
         """
         v_id = vid or extract_video_id(url)
+        now_ts = time.time()
         with self._lock:
-            prefer_cookie = bool(v_id and v_id in self._cookie_required_vids)
+            prefer_cookie = bool(
+                (v_id and v_id in self._cookie_required_vids)
+                or (now_ts < self._bot_gate_until)
+            )
         has_cookie = self._has_cookie_configured()
 
         last_err: Exception | None = None
 
-        # TẦNG 1: Bóc ẩn danh bằng API visionos + web_safari kèm chữ ký TLS Safari (không phơi Cookie)
-        if not prefer_cookie:
-            try:
-                opts_stealth = self._build_ydl_extract_opts(
-                    use_cookies=False,
-                    player_clients=["visionos", "web_safari"],
-                    impersonate_browser="safari",
-                )
-                with self._guarded_extract_slot(cancel_ev):
+        with self._guarded_extract_slot(cancel_ev):
+            # TẦNG 1: 1-Call `visionos` lấy thẳng luồng HTTPS MP4 1080p gốc (không tải m3u8 thừa, không phơi Cookie)
+            if not prefer_cookie:
+                try:
+                    opts_stealth = self._build_ydl_extract_opts(
+                        use_cookies=False,
+                        player_clients=["visionos"],
+                        impersonate_browser="safari",
+                    )
                     with yt_dlp.YoutubeDL(opts_stealth) as ydl:
                         info = ydl.extract_info(url, download=False)
-                if self._has_playable_video(info):
-                    return info
-            except DownloadCancelledError:
-                raise
-            except Exception as e1:
-                last_err = e1
-                if has_cookie:
-                    self._log(f"ℹ️ [{v_id}] Chuyển sang Tầng 2 (Kho Cookie xác thực) do kênh yêu cầu đăng nhập...")
+                    if self._has_playable_video(info):
+                        return info
+                except DownloadCancelledError:
+                    raise
+                except Exception as e1:
+                    last_err = e1
+                    err_low = str(e1).lower()
+                    if "not a bot" in err_low or "sign in" in err_low:
+                        with self._lock:
+                            self._bot_gate_until = time.time() + 300.0
+                    if has_cookie:
+                        self._log(f"ℹ️ [{v_id}] Chuyển thẳng sang Tầng 2 (Kho Cookie xác thực)...")
 
-        # TẦNG 2: Bóc kèm Kho Cookie sống + chữ ký TLS Chrome thật (cho video giới hạn tuổi / hội viên)
-        if has_cookie:
+            # TẦNG 2: Bóc kèm Kho Cookie sống + chữ ký TLS Chrome thật
+            if has_cookie:
+                try:
+                    opts_cookie = self._build_ydl_extract_opts(
+                        use_cookies=True,
+                        player_clients=None,
+                        impersonate_browser="chrome",
+                    )
+                    with yt_dlp.YoutubeDL(opts_cookie) as ydl:
+                        info = ydl.extract_info(url, download=False)
+                    if self._has_playable_video(info):
+                        if v_id:
+                            with self._lock:
+                                if len(self._cookie_required_vids) > 500:
+                                    self._cookie_required_vids.clear()
+                                self._cookie_required_vids.add(v_id)
+                        return info
+                except DownloadCancelledError:
+                    raise
+                except Exception as e2:
+                    last_err = e2
+                    e2_low = str(e2).lower()
+                    if "not a bot" in e2_low:
+                        raise RuntimeError(
+                            "YouTube đang chặn IP mạng hiện tại (hãy kiểm tra tắt HMA/VPN toàn máy) "
+                            "hoặc file Cookies đã hết hạn đăng nhập!"
+                        ) from e2
+                    self._log(f"⚠️ [{v_id}] Lỗi đọc Cookie ({e2}), thử phương án dự phòng...")
+
+            # TẦNG 3: Dự phòng cuối bằng bộ client mặc định + Chrome TLS không Cookie
             try:
-                opts_cookie = self._build_ydl_extract_opts(
-                    use_cookies=True,
+                opts_plain = self._build_ydl_extract_opts(
+                    use_cookies=False,
                     player_clients=None,
                     impersonate_browser="chrome",
                 )
-                with self._guarded_extract_slot(cancel_ev):
-                    with yt_dlp.YoutubeDL(opts_cookie) as ydl:
-                        info = ydl.extract_info(url, download=False)
-                if self._has_playable_video(info):
-                    if v_id:
-                        with self._lock:
-                            if len(self._cookie_required_vids) > 500:
-                                self._cookie_required_vids.clear()
-                            self._cookie_required_vids.add(v_id)
-                    return info
-            except DownloadCancelledError:
-                raise
-            except Exception as e2:
-                last_err = e2
-                self._log(f"⚠️ [{v_id}] Lỗi đọc Cookie ({e2}), thử phương án dự phòng không Cookie...")
-
-        # TẦNG 3: Dự phòng cuối bằng bộ client mặc định + Chrome TLS không Cookie
-        try:
-            opts_plain = self._build_ydl_extract_opts(
-                use_cookies=False,
-                player_clients=None,
-                impersonate_browser="chrome",
-            )
-            with self._guarded_extract_slot(cancel_ev):
                 with yt_dlp.YoutubeDL(opts_plain) as ydl:
                     return ydl.extract_info(url, download=False)
-        except DownloadCancelledError:
-            raise
-        except Exception as e3:
-            raise (last_err or e3)
+            except DownloadCancelledError:
+                raise
+            except Exception as e3:
+                err_final = last_err or e3
+                if "not a bot" in str(err_final).lower():
+                    raise RuntimeError(
+                        "YouTube đang chặn IP mạng hiện tại (hãy kiểm tra tắt HMA/VPN toàn máy) "
+                        "hoặc cập nhật lại Cookies YouTube!"
+                    ) from err_final
+                raise err_final
 
     def prefetch_url(self, video_url: str):
         vid = extract_video_id(video_url)
@@ -864,14 +883,19 @@ class TurboDownloaderEngine:
 
         max_h = max((int(f.get("height") or 0) for f in v_formats), default=0)
 
-        # Chọn Audio AAC (mp4a) chất lượng cao nhất để ghép MP4 0.2s không cần encode
+        # Chọn Audio AAC (mp4a) bản NGÔN NGỮ GỐC (original) chất lượng cao nhất chuẩn IDM
         def _audio_score(af):
             acodec = (af.get("acodec") or "").lower()
             proto = (af.get("protocol") or "").lower()
+            fid = str(af.get("format_id") or "")
+            note = (af.get("format_note") or "").lower()
             is_aac = 1 if ("mp4a" in acodec or af.get("ext") == "m4a") else 0
-            is_https = 1 if proto in ("https", "http") else 0
+            is_https = 1 if proto in ("https", "http") and not af.get("fragments") else 0
+            lang_pref = int(af.get("language_preference") if af.get("language_preference") is not None else -1)
+            is_orig = 1 if ("original" in note or lang_pref >= 10 or fid == "140") else 0
+            not_drc = 0 if ("drc" in fid.lower() or "drc" in note) else 1
             abr = float(af.get("abr") or af.get("tbr") or 0)
-            return (is_aac, is_https, abr)
+            return (is_aac, is_https, is_orig, lang_pref, not_drc, abr)
 
         best_audio = max(a_formats, key=_audio_score) if a_formats else None
 
@@ -881,11 +905,13 @@ class TurboDownloaderEngine:
 
         def _video_speed_score(vf):
             proto = (vf.get("protocol") or "").lower()
-            # HLS m3u8 trên YouTube cho phép kéo 24-32 mảnh song song đạt ~110+ MB/s
-            is_hls = 1 if "m3u8" in proto else 0
+            # ƯU TIÊN SỐ 1 LÀ HTTPS MP4 NGUYÊN BẢN CỦA GOOGLE (itag 137 - y hệt IDM!):
+            # Giúp kéo `&range=` tốc độ tối đa VÀ giữ nguyên `time_base = 1/15360` chuẩn ISO MP4
+            # để khi đưa vào CapCut / Premiere thì GPU Hardware Decode + Render mượt gấp nhiều lần .ts!
+            is_https_native = 1 if (proto in ("https", "http") and not vf.get("fragments")) else 0
             fps = float(vf.get("fps") or 30)
             tbr = float(vf.get("tbr") or vf.get("vbr") or 0)
-            return (is_hls, fps, tbr)
+            return (is_https_native, fps, tbr)
 
         chosen_v = None
         need_transcode = False
@@ -958,35 +984,35 @@ class TurboDownloaderEngine:
         on_delta_bytes,
     ) -> bool:
         """
-        Tải luồng HTTPS trực tiếp của googlevideo.com bằng N kết nối song song,
-        mỗi mảnh <= 4MB để phá bỏ hoàn toàn cơ chế bóp băng thông đơn luồng của YouTube!
+        Tải luồng HTTPS MP4 gốc (itag 137 / 140) tốc độ cao chuẩn IDM:
+        - Truyền trực tiếp tham số `&range=start-end` trên URL googlevideo.com để né hoàn toàn
+          bộ giới hạn băng thông HTTP Range Header (~6-10 MB/s) của YouTube!
+        - Giữ đúng 1 File Handle mở duy nhất suốt phiên tải (tránh mở/đóng file 40-60 lần gây nghẽn Antivirus).
         """
         url = fmt["url"]
         base_headers = dict(fmt.get("http_headers") or {})
         total_size = int(fmt.get("filesize") or 0)
 
-        # Kiểm tra hỗ trợ Range 206 & lấy chính xác kích thước byte thực tế
-        probe_headers = dict(base_headers)
-        probe_headers["Range"] = "bytes=0-0"
-        r0 = self._http_session.get(url, headers=probe_headers, stream=True, timeout=10)
-        try:
-            if r0.status_code != 206:
-                return False
-            cr = r0.headers.get("Content-Range", "")
-            m_tot = re.search(r"/(\d+)$", cr)
-            if m_tot:
-                total_size = int(m_tot.group(1))
-        finally:
-            r0.close()
+        # Chỉ probe bytes=0-0 khi metadata chưa có sẵn chính xác filesize (tiết kiệm ~300ms RTT!)
+        if total_size <= 0:
+            probe_headers = dict(base_headers)
+            probe_headers["Range"] = "bytes=0-0"
+            r0 = self._http_session.get(url, headers=probe_headers, stream=True, timeout=10)
+            try:
+                if r0.status_code != 206:
+                    return False
+                cr = r0.headers.get("Content-Range", "")
+                m_tot = re.search(r"/(\d+)$", cr)
+                if m_tot:
+                    total_size = int(m_tot.group(1))
+            finally:
+                r0.close()
 
         if total_size <= 0:
             return False
 
-        # Cấp phát trước kích thước file trên đĩa
-        with open(out_path, "wb") as fp:
-            fp.truncate(total_size)
-
-        chunk_size = 4 * 1024 * 1024  # 4MB mỗi mảnh Range -> không bao giờ bị throttle
+        # Chia mảnh 6MB tối ưu cho tốc độ cao mà không tốn overhead kết nối thừa
+        chunk_size = 6 * 1024 * 1024
         ranges = []
         pos = 0
         while pos < total_size:
@@ -994,46 +1020,94 @@ class TurboDownloaderEngine:
             ranges.append((pos, end))
             pos = end + 1
 
-        workers = min(max(2, num_threads), len(ranges))
+        workers = min(max(2, num_threads), 32, len(ranges))
+        can_use_url_range = ("googlevideo.com" in url) and ("&range=" not in url) and ("?range=" not in url)
+        url_sep = "&" if "?" in url else "?"
+        write_lock = threading.Lock()
 
-        def _fetch_range(rng):
-            start_b, end_b = rng
-            for attempt in range(4):
-                self._check_cancel(cancel_ev)
-                written_this_try = 0
-                try:
-                    hdrs = dict(base_headers)
-                    hdrs["Range"] = f"bytes={start_b}-{end_b}"
-                    with self._http_session.get(url, headers=hdrs, stream=True, timeout=15) as resp:
-                        if resp.status_code not in (200, 206):
-                            raise RuntimeError(f"HTTP {resp.status_code}")
-                        with open(out_path, "r+b") as f_out:
-                            f_out.seek(start_b)
-                            for buf in resp.iter_content(chunk_size=262144):
-                                self._check_cancel(cancel_ev)
-                                if not buf:
+        with open(out_path, "wb") as fp:
+            fp.truncate(total_size)
+
+        with open(out_path, "r+b") as shared_fp:
+            def _fetch_range(rng):
+                start_b, end_b = rng
+                expected_len = end_b - start_b + 1
+                use_q_param = can_use_url_range
+
+                for attempt in range(4):
+                    self._check_cancel(cancel_ev)
+                    reported_this_try = 0
+                    write_offset = start_b
+                    try:
+                        hdrs = dict(base_headers)
+                        if use_q_param:
+                            req_url = f"{url}{url_sep}range={start_b}-{end_b}"
+                            hdrs.pop("Range", None)
+                        else:
+                            req_url = url
+                            hdrs["Range"] = f"bytes={start_b}-{end_b}"
+
+                        with self._http_session.get(req_url, headers=hdrs, stream=True, timeout=15) as resp:
+                            if resp.status_code not in (200, 206):
+                                if use_q_param:
+                                    use_q_param = False
                                     continue
-                                f_out.write(buf)
-                                n = len(buf)
-                                written_this_try += n
-                                on_delta_bytes(n)
-                    if written_this_try == (end_b - start_b + 1):
-                        return
-                    # Nếu đọc thiếu byte, hoàn trả số đếm rồi thử lại mảnh này
-                    on_delta_bytes(-written_this_try)
-                except DownloadCancelledError:
-                    raise
-                except Exception:
-                    if written_this_try > 0:
-                        on_delta_bytes(-written_this_try)
-                    if attempt == 3:
-                        raise
-                    time.sleep(0.25 * (attempt + 1))
+                                raise RuntimeError(f"HTTP {resp.status_code}")
 
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futs = [pool.submit(_fetch_range, r) for r in ranges]
-            for f in futs:
-                f.result()
+                            cl_hdr = resp.headers.get("Content-Length")
+                            if use_q_param and resp.status_code == 200 and cl_hdr and int(cl_hdr) > expected_len + 4096:
+                                # Server phớt lờ query range -> chuyển tức thì sang Header Range
+                                use_q_param = False
+                                continue
+
+                            mem_buf = bytearray()
+                            for net_chunk in resp.iter_content(chunk_size=262144):
+                                self._check_cancel(cancel_ev)
+                                if not net_chunk:
+                                    continue
+                                n = len(net_chunk)
+                                mem_buf.extend(net_chunk)
+                                reported_this_try += n
+                                on_delta_bytes(n)
+
+                                # Xả xuống đĩa theo cụm >= 1MB để tối ưu tốc độ NVMe/SSD & không khóa luồng
+                                if len(mem_buf) >= 1048576:
+                                    with write_lock:
+                                        shared_fp.seek(write_offset)
+                                        shared_fp.write(mem_buf)
+                                    write_offset += len(mem_buf)
+                                    mem_buf.clear()
+
+                            if mem_buf:
+                                with write_lock:
+                                    shared_fp.seek(write_offset)
+                                    shared_fp.write(mem_buf)
+                                write_offset += len(mem_buf)
+                                mem_buf.clear()
+
+                        if reported_this_try == expected_len:
+                            return
+                        on_delta_bytes(-reported_this_try)
+                        if use_q_param:
+                            use_q_param = False
+                    except DownloadCancelledError:
+                        raise
+                    except Exception:
+                        if reported_this_try > 0:
+                            on_delta_bytes(-reported_this_try)
+                        if use_q_param and attempt == 0:
+                            use_q_param = False
+                            continue
+                        if attempt == 3:
+                            raise
+                        time.sleep(0.2 * (attempt + 1))
+
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futs = [pool.submit(_fetch_range, r) for r in ranges]
+                for f in futs:
+                    f.result()
+
+            shared_fp.flush()
 
         return os.path.exists(out_path) and os.path.getsize(out_path) == total_size
 
@@ -1520,7 +1594,11 @@ class TurboDownloaderEngine:
             ffmpeg_exe = os.path.join(self.caps["ffmpeg_dir"], "ffmpeg.exe")
             no_win = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
-            cmd = [ffmpeg_exe, "-y", "-hide_banner", "-loglevel", "error", "-i", v_part]
+            is_ts_source = v_part.endswith(".ts") or bool(a_part and a_part.endswith(".ts"))
+            cmd = [ffmpeg_exe, "-y", "-hide_banner", "-loglevel", "error"]
+            if is_ts_source:
+                cmd.extend(["-fflags", "+genpts"])
+            cmd.extend(["-i", v_part])
             if a_part and os.path.exists(a_part):
                 cmd.extend(["-i", a_part])
 
@@ -1529,17 +1607,17 @@ class TurboDownloaderEngine:
                 task["status_text"] = f"{task['phase_label']} • ⏱ Đã chạy: {time.perf_counter() - t0:.1f}s"
                 self._emit_update(task)
                 if self.caps["nvenc_ok"]:
-                    cmd.extend(["-c:v", "h264_nvenc", "-preset", "p2", "-cq", "20"])
+                    cmd.extend(["-c:v", "h264_nvenc", "-preset", "p1", "-cq", "21"])
                 else:
-                    cmd.extend(["-c:v", "libx264", "-preset", "veryfast", "-crf", "20"])
+                    cmd.extend(["-c:v", "libx264", "-preset", "ultrafast", "-crf", "21"])
                 cmd.extend(["-c:a", "aac", "-b:a", "192k"])
             else:
                 cmd.extend(["-c", "copy"])
-                # Nếu đầu vào là MPEG-TS AAC thì cần bộ lọc bitstream chuẩn sang MP4 container
-                if (a_part and a_part.endswith(".ts")) or v_part.endswith(".ts"):
+                if is_ts_source:
                     cmd.extend(["-bsf:a", "aac_adtstoasc"])
 
-            cmd.extend(["-movflags", "+faststart", final_mp4])
+            # Ghi 1-pass trực tiếp ra ổ đĩa (không bật +faststart ghi đè lần 2 vô ích cho CapCut/Premiere)
+            cmd.append(final_mp4)
             subprocess.run(cmd, check=True, creationflags=no_win)
 
             if not os.path.exists(final_mp4) or os.path.getsize(final_mp4) < 10240:
