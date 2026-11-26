@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Client kết nối trực tiếp Pure Push 0ms tới VPS Soitube (soitobe.duckdns.org / 192.46.229.231).
+Client kết nối trực tiếp Pure Push 0ms tới VPS Soitube (soitobe.duckdns.org / 180.93.118.9).
 - Tuyệt đối KHÔNG dùng RSS, KHÔNG qua Telegram:
   YouTube -> Google Webhook -> VPS RAM -> Ống TCP /api/pc/stream (0ms) -> App Desktop!
 - Ngay khoảnh khắc nhận `video_detected` (0ms), kích hoạt Pre-fetch bóc sẵn luồng tải trước cả khi phân loại xong.
@@ -24,7 +24,8 @@ def now_ict_str() -> str:
     return datetime.now(ICT_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
 DEFAULT_SERVER_URL = "http://soitobe.duckdns.org"
-FALLBACK_VPS_IP = "192.46.229.231"
+FALLBACK_VPS_IP = "180.93.118.9"
+LEGACY_DEAD_IPS = {"192.46.229.231", "160.191.50.153"}
 
 
 def build_candidate_base_urls(raw_url: str) -> list[str]:
@@ -34,6 +35,10 @@ def build_candidate_base_urls(raw_url: str) -> list[str]:
 
     parsed = urlparse(raw)
     host = parsed.hostname or "soitobe.duckdns.org"
+    if host.lower() in LEGACY_DEAD_IPS:
+        raw = DEFAULT_SERVER_URL
+        parsed = urlparse(raw)
+        host = "soitobe.duckdns.org"
 
     if parsed.port:
         return [f"{parsed.scheme}://{host}:{parsed.port}"]
@@ -93,19 +98,28 @@ class SoitubeVPSClient:
     def resolve_working_url(self, raw_url: str) -> tuple[bool, str]:
         candidates = build_candidate_base_urls(raw_url)
         last_err = None
+        dead_hosts = set()
         for cand in candidates:
+            chost = urlparse(cand).hostname or ""
+            if chost in dead_hosts:
+                continue
             for probe_ep in ("/api/system_health", "/login"):
                 try:
                     t0 = time.perf_counter()
-                    r = self.session.get(f"{cand}{probe_ep}", timeout=4.0)
+                    r = self.session.get(f"{cand}{probe_ep}", timeout=(1.8, 4.0))
                     if r.status_code < 500:
                         self.last_ping_ms = int((time.perf_counter() - t0) * 1000)
                         self.base_url = cand
                         if self.on_ping_updated:
                             self.on_ping_updated(self.last_ping_ms)
                         return True, cand
+                except requests.exceptions.ConnectTimeout as e:
+                    last_err = e
+                    dead_hosts.add(chost)
+                    break
                 except Exception as e:
                     last_err = e
+                    break
         return False, f"Không kết nối được máy chủ ({raw_url}): {last_err}"
 
     def login(self, server_url: str, username: str, password: str) -> tuple[bool, str]:
