@@ -292,8 +292,6 @@ def scan_all_capcut_projects() -> list[dict]:
         dc_file = os.path.join(full, "draft_content.json")
         if not (os.path.isdir(full) and os.path.isfile(dc_file)):
             continue
-        if os.path.isfile(os.path.join(full, ".sniper_auto_draft")):
-            continue
 
         meta_item = store_meta.get(name) or {}
         disp_name = str(meta_item.get("draft_name") or "").strip()

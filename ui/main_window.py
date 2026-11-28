@@ -1078,7 +1078,7 @@ class SniperMainWindow(QMainWindow):
             return False, f"Khác nhãn Note ({note_flt})"
 
         v_type = (v.get("v_type") or "Unknown").upper()
-        if "LIVE" in v_type or v_type == "POST":
+        if "LIVE" in v_type or "PREMIERE" in v_type or v_type == "POST":
             return False, f"Định dạng {v_type}"
         if v_type == "SHORT" and not self.cfg.get("allow_short", False):
             return False, "Đang tắt tự kéo Shorts"
@@ -1172,10 +1172,31 @@ class SniperMainWindow(QMainWindow):
                 force_redownload=False,
             )
         else:
-            # Đưa nhẹ vào mục "Bỏ qua / Lỗi" để người dùng có thể bấm "⬇ Tải Ngay" bù nếu muốn!
+            # Đưa vào mục "Bỏ qua / Lỗi" để người dùng có thể bấm "⬇ Tải" thủ công bất cứ lúc nào!
             if vid:
                 self.downloader.request_thumbnail(vid)
-                st_parts = [f"⏭ Bỏ qua tự tải ({reason})"]
+                v_type_up = str(v_type).upper()
+                is_live_watch = ("LIVE" in v_type_up) or ("PREMIERE" in v_type_up)
+                if is_live_watch:
+                    if self.cfg.get("sound_alert", True):
+                        play_alert_beep(is_complete=False)
+                    if self.cfg.get("toast_popup", True):
+                        ch_disp = f"{cname} • {note}" if note else cname
+                        if delay_txt:
+                            ch_disp = f"{ch_disp} • {delay_txt}"
+                        pop = DesktopToastPopup(
+                            f"🔴 CANH VIDEO {v_type_up} • BẤM TẢI THỦ CÔNG",
+                            ch_disp,
+                            title,
+                            accent="#F59E0B",
+                            thumb_bytes=self.downloader.get_cached_thumbnail(vid),
+                            duration_ms=9000,
+                            video_url=url,
+                        )
+                        pop.show()
+                    st_parts = [f"🔴 Canh video {v_type_up} (Không tự tải — bấm ⬇ Tải khi xong Live)"]
+                else:
+                    st_parts = [f"⏭ Bỏ qua tự tải ({reason})"]
                 if delay_txt:
                     st_parts.append(delay_txt)
                 if v.get("v_dur"):
